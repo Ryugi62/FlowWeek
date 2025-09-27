@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { Flow, Node, Edge } from '../App';
 import { useUiStore } from '../stores';
 import { useQueryClient } from '@tanstack/react-query';
-import { updateNode, createNode, createEdge, deleteNode } from '../api';
+import { updateNode, createNode, createEdge, deleteNode, deleteEdge } from '../api';
 
 interface CanvasProps {
   flows: Flow[];
@@ -27,6 +27,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const [size, setSize] = useState({ w: 800, h: 600 });
   const ui = useUiStore();
   const queryClient = useQueryClient();
+  const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null);
 
   // We'll perform manual optimistic updates using queryClient and direct api calls
 
@@ -85,18 +86,59 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       ctx.stroke();
     }
 
-    // render edges (simple straight lines)
-    ctx.lineWidth = 2 / (ui.view.zoom * DPR);
-    ctx.strokeStyle = '#9ca3af88';
-    edges.forEach(e => {
+      // render edges (bezier routing)
+      edges.forEach(e => {
+        const isSelectedEdge = selectedEdgeId === e.id;
+        if (isSelectedEdge) {
+          ctx.strokeStyle = '#f9731677';
+          ctx.lineWidth = 3 / (ui.view.zoom * DPR);
+        } else {
+          ctx.strokeStyle = '#9ca3af88';
+          ctx.lineWidth = 2 / (ui.view.zoom * DPR);
+        }
       const s = nodes.find(n => n.id === e.source_node_id);
       const t = nodes.find(n => n.id === e.target_node_id);
       if (!s || !t) return;
+      // compute control points for a simple cubic bezier
+      const x1 = s.x + s.width / 2;
+      const y1 = s.y + s.height / 2;
+      const x2 = t.x + t.width / 2;
+      const y2 = t.y + t.height / 2;
+      const dx = Math.abs(x2 - x1);
+      const dir = x2 > x1 ? 1 : -1;
+      const cp1x = x1 + dir * dx * 0.25;
+      const cp1y = y1;
+      const cp2x = x2 - dir * dx * 0.25;
+      const cp2y = y2;
       ctx.beginPath();
-      ctx.moveTo(s.x + s.width / 2, s.y + s.height / 2);
-      ctx.lineTo(t.x + t.width / 2, t.y + t.height / 2);
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
       ctx.stroke();
     });
+
+    // preview link while linking
+    if (linkingRef.current && linkingRef.current.fromId != null) {
+      const from = nodes.find(n => n.id === linkingRef.current!.fromId);
+      if (from) {
+        const x1 = from.x + from.width / 2;
+        const y1 = from.y + from.height / 2;
+        const x2 = linkingRef.current.toX;
+        const y2 = linkingRef.current.toY;
+        const dx = Math.abs(x2 - x1);
+        const dir = x2 > x1 ? 1 : -1;
+        const cp1x = x1 + dir * dx * 0.25;
+        const cp1y = y1;
+        const cp2x = x2 - dir * dx * 0.25;
+        const cp2y = y2;
+        ctx.strokeStyle = '#60a5fa88';
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
 
     // render nodes
     // apply search filter if present
@@ -151,6 +193,15 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       (e.target as Element).setPointerCapture?.(e.pointerId);
       lastPointerId = e.pointerId;
       const p = screenToWorld(e.clientX, e.clientY);
+      // check edge hit first
+      const hitEdge = pointerEdgeHitTest(e.clientX, e.clientY);
+      if (hitEdge != null) {
+        setSelectedEdgeId(hitEdge);
+        ui.clearNodeSelection();
+        return;
+      } else {
+        setSelectedEdgeId(null);
+      }
       if (ui.mode === 'panning' || e.button === 1) {
         panRef.current = { isPanning: true, startX: e.clientX, startY: e.clientY };
         return;
@@ -190,6 +241,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       }
       // clicked empty space
       ui.clearNodeSelection();
+      setSelectedEdgeId(null);
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -340,10 +392,58 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     canvas.addEventListener('dblclick', onDoubleClick);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     // contextmenu for right-click actions
+    const isPointNearBezier = (x1:number,y1:number,cp1x:number,cp1y:number,cp2x:number,cp2y:number,x2:number,y2:number, px:number, py:number) => {
+      const steps = 30;
+      const DPR_local = window.devicePixelRatio || 1;
+      const threshold = 8 / (ui.view.zoom * DPR_local);
+      for (let i=0;i<=steps;i++){
+        const t = i/steps;
+        const u = 1 - t;
+        const bx = u*u*u*x1 + 3*u*u*t*cp1x + 3*u*t*t*cp2x + t*t*t*x2;
+        const by = u*u*u*y1 + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*y2;
+        const dx = bx - px; const dy = by - py;
+        if (Math.sqrt(dx*dx+dy*dy) <= threshold) return true;
+      }
+      return false;
+    };
+
     const onContext = (ev: MouseEvent) => {
       ev.preventDefault();
       const p = screenToWorld(ev.clientX, ev.clientY);
-      // hit test
+      for (let ei = edges.length - 1; ei >= 0; ei--) {
+        const e = edges[ei];
+        const s = nodes.find(n => n.id === e.source_node_id);
+        const t = nodes.find(n => n.id === e.target_node_id);
+        if (!s || !t) continue;
+        const x1 = s.x + s.width / 2;
+        const y1 = s.y + s.height / 2;
+        const x2 = t.x + t.width / 2;
+        const y2 = t.y + t.height / 2;
+        const dx = Math.abs(x2 - x1);
+        const dir = x2 > x1 ? 1 : -1;
+        const cp1x = x1 + dir * dx * 0.25;
+        const cp1y = y1;
+        const cp2x = x2 - dir * dx * 0.25;
+        const cp2y = y2;
+        if (isPointNearBezier(x1,y1,cp1x,cp1y,cp2x,cp2y,x2,y2,p.x,p.y)){
+          const action = window.prompt('Context action for edge ' + e.id + ' (delete/cancel)');
+          if (action === 'delete'){
+            const previous = queryClient.getQueryData<Edge[]>(['edges', boardId]) || [];
+            queryClient.setQueryData<Edge[]>(['edges', boardId], previous.filter(x => x.id !== e.id));
+            (async () => {
+              try {
+                await deleteEdge(boardId, e.id);
+                queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
+              } catch (err) {
+                queryClient.setQueryData<Edge[]>(['edges', boardId], previous);
+              }
+            })();
+          }
+          return;
+        }
+      }
+
+      // hit test nodes
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
         if (isPointInNode(p.x, p.y, n)) {
@@ -377,7 +477,32 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         }
       }
     };
+    // add pointerdown edge hit-testing to allow selecting edges
+    const pointerEdgeHitTest = (clientX: number, clientY: number) => {
+      const p = screenToWorld(clientX, clientY);
+      for (let ei = edges.length - 1; ei >= 0; ei--) {
+        const e = edges[ei];
+        const s = nodes.find(n => n.id === e.source_node_id);
+        const t = nodes.find(n => n.id === e.target_node_id);
+        if (!s || !t) continue;
+        const x1 = s.x + s.width / 2;
+        const y1 = s.y + s.height / 2;
+        const x2 = t.x + t.width / 2;
+        const y2 = t.y + t.height / 2;
+        const dx = Math.abs(x2 - x1);
+        const dir = x2 > x1 ? 1 : -1;
+        const cp1x = x1 + dir * dx * 0.25;
+        const cp1y = y1;
+        const cp2x = x2 - dir * dx * 0.25;
+        const cp2y = y2;
+        if (isPointNearBezier(x1,y1,cp1x,cp1y,cp2x,cp2y,x2,y2,p.x,p.y)){
+          return e.id;
+        }
+      }
+      return null;
+    };
     canvas.addEventListener('contextmenu', onContext);
+
 
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);

@@ -35,3 +35,17 @@ export const deleteEdge = async (boardId: number, edgeId: number) => {
   const res = await apiClient.delete(`/boards/${boardId}/edges/${edgeId}`);
   return res.data;
 };
+
+// Simple WebSocket listener for development collaboration
+export function connectWs(onMessage: (msg: any) => void) {
+  try {
+    const url = (import.meta.env.VITE_WS_URL || 'ws://localhost:3001');
+    const ws = new WebSocket(url);
+    ws.addEventListener('message', (ev) => {
+      try { onMessage(JSON.parse(ev.data)); } catch (e) { /* ignore */ }
+    });
+    return ws;
+  } catch (e) {
+    return null;
+  }
+}

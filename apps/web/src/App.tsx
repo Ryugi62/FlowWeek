@@ -3,7 +3,8 @@ import InfiniteCanvas from './components/InfiniteCanvas';
 import DetailPanel from './components/DetailPanel';
 import Toolbar from './components/Toolbar';
 import { useQuery } from '@tanstack/react-query';
-import apiClient from './api';
+import apiClient, { connectWs } from './api';
+import { queryClient } from './stores';
 import { useState, useEffect } from 'react'; // Import useEffect
 import { useUiStore } from './stores'; // Import useUiStore
 
@@ -47,6 +48,20 @@ function App() {
   const { data: flows = [] } = useQuery<Flow[]>({ queryKey: ['flows', boardId], queryFn: () => fetchFlows(boardId) });
   const { data: nodes = [] } = useQuery<Node[]>({ queryKey: ['nodes', boardId], queryFn: () => fetchNodes(boardId) });
   const { data: edges = [] } = useQuery<Edge[]>({ queryKey: ['edges', boardId], queryFn: () => fetchEdges(boardId) });
+
+  // connect to ws for live updates (development)
+  useEffect(() => {
+    const ws = connectWs((msg: any) => {
+      if (!msg || !msg.type) return;
+      if (msg.type.startsWith('node:')) {
+        queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+      }
+      if (msg.type.startsWith('edge:')) {
+        queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
+      }
+    });
+    return () => { ws && ws.close(); };
+  }, [boardId]);
 
   const editingNode = nodes.find(n => n.id === editingNodeId) || null;
 

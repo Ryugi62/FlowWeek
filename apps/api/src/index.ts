@@ -1,6 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+// lightweight ws server for collaboration simulation
+import http from 'http';
+let WebSocketServer: any = null;
+try {
+  // require 'ws' at runtime if installed
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  WebSocketServer = require('ws').Server;
+} catch (e) {
+  WebSocketServer = null;
+}
 
 dotenv.config();
 
@@ -52,6 +62,7 @@ app.post('/api/boards/:boardId/nodes', (req, res) => {
   const newNode = { id: nextId, board_id: boardId, flow_id: payload.flow_id || null, type: payload.type || 'note', x: payload.x || 0, y: payload.y || 0, width: payload.width || 160, height: payload.height || 64, title: payload.title || '', content: payload.content || '' };
   mockNodes.push(newNode as any);
   res.status(201).json({ data: newNode });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'node:created', data: newNode }); } catch (e) {}
 });
 
 // Update node (support both /api/nodes/:id and /api/boards/:boardId/nodes/:id)
@@ -63,6 +74,7 @@ app.patch(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], (req, re
   const updated = { ...mockNodes[idx], ...payload };
   mockNodes[idx] = updated as any;
   res.json({ data: updated });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'node:updated', data: updated }); } catch (e) {}
 });
 
 // Delete node (support routes)
@@ -72,6 +84,7 @@ app.delete(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], (req, r
   if (idx === -1) return res.status(404).json({ error: 'Node not found' });
   const removed = mockNodes.splice(idx, 1)[0];
   res.json({ data: removed });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'node:deleted', data: removed }); } catch (e) {}
 });
 
 // Create edge
@@ -82,6 +95,7 @@ app.post('/api/boards/:boardId/edges', (req, res) => {
   const newEdge = { id: nextId, board_id: boardId, source_node_id: payload.source_node_id, target_node_id: payload.target_node_id };
   mockEdges.push(newEdge as any);
   res.status(201).json({ data: newEdge });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'edge:created', data: newEdge }); } catch (e) {}
 });
 
 // Delete edge
@@ -91,8 +105,34 @@ app.delete(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], (req, r
   if (idx === -1) return res.status(404).json({ error: 'Edge not found' });
   const removed = mockEdges.splice(idx, 1)[0];
   res.json({ data: removed });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'edge:deleted', data: removed }); } catch (e) {}
 });
 
-app.listen(PORT, () => {
+// Create http server so we can attach ws
+const server = http.createServer(app);
+
+if (WebSocketServer) {
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws: any) => {
+    console.log('ws client connected');
+    ws.on('message', (msg: any) => {
+      // echo to all
+      wss.clients.forEach((c: any) => { if (c !== ws && c.readyState === 1) c.send(msg); });
+    });
+  });
+  // helper to broadcast changes
+  const broadcast = (obj: any) => {
+    const msg = JSON.stringify(obj);
+    wss.clients.forEach((c: any) => { if (c.readyState === 1) c.send(msg); });
+  };
+
+  // expose for route handlers
+  (global as any).broadcast = broadcast;
+
+  // integrate broadcasts into CRUD handlers by wrapping responses (simple emit)
+  const originalPostNode = app.post;
+}
+
+server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
