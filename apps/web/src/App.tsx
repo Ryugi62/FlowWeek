@@ -53,11 +53,28 @@ function App() {
   useEffect(() => {
     const ws = connectWs((msg: any) => {
       if (!msg || !msg.type) return;
-      if (msg.type.startsWith('node:')) {
-        queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+      // granular updates for nodes
+      if (msg.type === 'node:created') {
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => [...(old || []), msg.data]);
+        return;
       }
-      if (msg.type.startsWith('edge:')) {
-        queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
+      if (msg.type === 'node:updated') {
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => n.id === msg.data.id ? msg.data : n));
+        return;
+      }
+      if (msg.type === 'node:deleted') {
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).filter(n => n.id !== msg.data.id));
+        return;
+      }
+
+      // granular updates for edges
+      if (msg.type === 'edge:created') {
+        queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => [...(old || []), msg.data]);
+        return;
+      }
+      if (msg.type === 'edge:deleted') {
+        queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).filter(e => e.id !== msg.data.id));
+        return;
       }
     });
     return () => { ws && ws.close(); };
