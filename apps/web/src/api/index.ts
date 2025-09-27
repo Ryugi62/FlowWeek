@@ -36,6 +36,11 @@ export const deleteEdge = async (boardId: number, edgeId: number) => {
   return res.data;
 };
 
+export const updateEdge = async (boardId: number, edgeId: number, payload: any) => {
+  const res = await apiClient.patch(`/boards/${boardId}/edges/${edgeId}`, payload);
+  return res.data;
+};
+
 // Simple WebSocket listener for development collaboration
 export function connectWs(onMessage: (msg: any) => void) {
   try {

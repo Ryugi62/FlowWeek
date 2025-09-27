@@ -108,6 +108,18 @@ app.delete(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], (req, r
   try { (global as any).broadcast && (global as any).broadcast({ type: 'edge:deleted', data: removed }); } catch (e) {}
 });
 
+// Update edge (reconnect)
+app.patch(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], (req, res) => {
+  const edgeId = parseInt((req.params.edgeId as string) || '0');
+  const payload = req.body || {};
+  const idx = mockEdges.findIndex(e => e.id === edgeId);
+  if (idx === -1) return res.status(404).json({ error: 'Edge not found' });
+  const updated = { ...mockEdges[idx], ...payload };
+  mockEdges[idx] = updated as any;
+  res.json({ data: updated });
+  try { (global as any).broadcast && (global as any).broadcast({ type: 'edge:updated', data: updated }); } catch (e) {}
+});
+
 // Create http server so we can attach ws
 const server = http.createServer(app);
 

@@ -24,6 +24,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const draggingRef = useRef<{ nodeId: number | null; offsetX: number; offsetY: number } | null>(null);
   const groupDragRef = useRef<Map<number, { x: number; y: number }> | null>(null);
   const linkingRef = useRef<{ fromId: number | null; toX: number; toY: number } | null>(null);
+  const edgeDragRef = useRef<{ edgeId: number; which: 'source' | 'target'; toX: number; toY: number; originalNodeId: number } | null>(null);
   const panRef = useRef<{ isPanning: boolean; startX: number; startY: number } | null>(null);
   const moveSnapshotRef = useRef<Map<number, { x: number; y: number }> | null>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -103,20 +104,43 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       const t = nodes.find(n => n.id === e.target_node_id);
       if (!s || !t) return;
       // compute control points for a simple cubic bezier
-      const x1 = s.x + s.width / 2;
-      const y1 = s.y + s.height / 2;
-      const x2 = t.x + t.width / 2;
-      const y2 = t.y + t.height / 2;
+      // endpoints (may be overridden by an active edge-drag preview)
+      let x1 = s.x + s.width / 2;
+      let y1 = s.y + s.height / 2;
+      let x2 = t.x + t.width / 2;
+      let y2 = t.y + t.height / 2;
+      // if this edge is being dragged, replace the dragged endpoint with preview coord
+      const ed = edgeDragRef.current;
+      if (ed && ed.edgeId === e.id) {
+        if (ed.which === 'source') {
+          x1 = ed.toX;
+          y1 = ed.toY;
+        } else {
+          x2 = ed.toX;
+          y2 = ed.toY;
+        }
+      }
       const dx = Math.abs(x2 - x1);
       const dir = x2 > x1 ? 1 : -1;
-      const cp1x = x1 + dir * dx * 0.25;
-      const cp1y = y1;
-      const cp2x = x2 - dir * dx * 0.25;
-      const cp2y = y2;
+      // simple control-point offsets to reduce overlap with node boxes
+      const cpOffset = Math.min(120, dx * 0.35);
+      const cp1x = x1 + dir * cpOffset * 0.4;
+      const cp2x = x2 - dir * cpOffset * 0.4;
+      // vertical nudge away from node centers to avoid crossing boxes
+      const cp1y = y1 + (y2 - y1) * 0.12 + Math.sign(y2 - y1) * Math.min(40, Math.abs(y2 - y1) * 0.12);
+      const cp2y = y2 - (y2 - y1) * 0.12 - Math.sign(y2 - y1) * Math.min(40, Math.abs(y2 - y1) * 0.12);
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
       ctx.stroke();
+      // draw small endpoint handles for easier reconnecting
+      ctx.fillStyle = '#60a5fa';
+      ctx.beginPath();
+      ctx.arc(x1, y1, 6 / (ui.view.zoom * DPR), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x2, y2, 6 / (ui.view.zoom * DPR), 0, Math.PI * 2);
+      ctx.fill();
     });
 
     // preview link while linking
@@ -129,10 +153,11 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         const y2 = linkingRef.current.toY;
         const dx = Math.abs(x2 - x1);
         const dir = x2 > x1 ? 1 : -1;
-        const cp1x = x1 + dir * dx * 0.25;
-        const cp1y = y1;
-        const cp2x = x2 - dir * dx * 0.25;
-        const cp2y = y2;
+        const cpOffset = Math.min(120, dx * 0.35);
+        const cp1x = x1 + dir * cpOffset * 0.4;
+        const cp2x = x2 - dir * cpOffset * 0.4;
+        const cp1y = y1 + (y2 - y1) * 0.12 + Math.sign(y2 - y1) * Math.min(40, Math.abs(y2 - y1) * 0.12);
+        const cp2y = y2 - (y2 - y1) * 0.12 - Math.sign(y2 - y1) * Math.min(40, Math.abs(y2 - y1) * 0.12);
         ctx.strokeStyle = '#60a5fa88';
         ctx.setLineDash([6, 6]);
         ctx.beginPath();
@@ -246,6 +271,27 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         }
       }
 
+      // detect edge endpoint hit (to start reconnecting)
+      for (let ei = edges.length - 1; ei >= 0; ei--) {
+        const edge = edges[ei];
+        const s = nodes.find(n => n.id === edge.source_node_id);
+        const t = nodes.find(n => n.id === edge.target_node_id);
+        if (!s || !t) continue;
+        const sx = s.x + s.width / 2;
+        const sy = s.y + s.height / 2;
+        const tx = t.x + t.width / 2;
+        const ty = t.y + t.height / 2;
+        const rworld = 10 / ui.view.zoom;
+        if (Math.hypot(p.x - sx, p.y - sy) <= rworld) {
+          edgeDragRef.current = { edgeId: edge.id, which: 'source', toX: sx, toY: sy, originalNodeId: edge.source_node_id };
+          return;
+        }
+        if (Math.hypot(p.x - tx, p.y - ty) <= rworld) {
+          edgeDragRef.current = { edgeId: edge.id, which: 'target', toX: tx, toY: ty, originalNodeId: edge.target_node_id };
+          return;
+        }
+      }
+
       // hit test nodes (top-most)
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
@@ -294,6 +340,14 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         const p = screenToWorld(e.clientX, e.clientY);
         linkingRef.current.toX = p.x;
         linkingRef.current.toY = p.y;
+        return;
+      }
+
+      // edge endpoint drag preview
+      if (edgeDragRef.current) {
+        const p = screenToWorld(e.clientX, e.clientY);
+        edgeDragRef.current.toX = p.x;
+        edgeDragRef.current.toY = p.y;
         return;
       }
 
@@ -387,6 +441,38 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
             break;
           }
         }
+      }
+      // finalize edge reconnect if any
+      if (edgeDragRef.current) {
+        const ed = edgeDragRef.current;
+        const p = screenToWorld(e.clientX, e.clientY);
+        // find node under release (if any)
+        let targetNode: Node | null = null;
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          const n = nodes[i];
+          if (isPointInNode(p.x, p.y, n) && n.id !== ed.originalNodeId) { targetNode = n; break; }
+        }
+        if (targetNode) {
+          const prev = edges.find(x => x.id === ed.edgeId) as Edge | undefined;
+          if (prev) {
+            const payload = ed.which === 'source' ? { source_node_id: targetNode.id } : { target_node_id: targetNode.id };
+            const redo = () => {
+              queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).map(x => x.id === ed.edgeId ? { ...x, ...payload } : x));
+              // persist
+              // updateEdge is imported at top
+              // @ts-ignore
+              updateEdge(boardId, ed.edgeId, payload).catch(()=>{});
+            };
+            const undo = () => {
+              queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).map(x => x.id === ed.edgeId ? prev : x));
+              // revert server - best-effort
+              // @ts-ignore
+              updateEdge(boardId, ed.edgeId, ed.which === 'source' ? { source_node_id: ed.originalNodeId } : { target_node_id: ed.originalNodeId }).catch(()=>{});
+            };
+            commandStack.execute({ redo, undo });
+          }
+        }
+        edgeDragRef.current = null;
       }
       draggingRef.current = null;
       lastPointerId = null;
