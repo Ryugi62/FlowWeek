@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useUiStore } from '../stores';
 import type { InteractionMode } from '../stores';
 import { useStore } from 'zustand';
+import { useQueryClient } from '@tanstack/react-query';
+import { deleteNode } from '../api';
 
 // We need to get the temporal store directly to access undo/redo
 const useTemporalStore = (store: any) => {
@@ -12,6 +14,33 @@ const useTemporalStore = (store: any) => {
 const Toolbar: React.FC = () => {
     const { mode, setMode } = useUiStore();
     const temporal = useTemporalStore(useUiStore);
+    const queryClient = useQueryClient();
+    const { searchTerm = '', setSearchTerm } = useUiStore();
+
+    // Delete key handler to delete selected nodes
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Delete') {
+                const state = useUiStore.getState();
+                const ids = Array.from(state.selectedNodeIds);
+                if (ids.length === 0) return;
+                // optimistic remove
+                const previous = queryClient.getQueryData<any>(['nodes', 1]) || [];
+                queryClient.setQueryData(['nodes', 1], (old = []) => (old as any[]).filter(n => !ids.includes(n.id)));
+                ids.forEach(async (id) => {
+                    try {
+                        await deleteNode(1, id);
+                    } catch (err) {
+                        // revert all on error
+                        queryClient.setQueryData(['nodes', 1], previous);
+                    }
+                });
+                state.clearNodeSelection();
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [queryClient]);
 
     const buttonStyle = (buttonMode: InteractionMode | 'action', disabled = false): React.CSSProperties => ({
         padding: '8px 12px',
@@ -41,6 +70,7 @@ const Toolbar: React.FC = () => {
             <button style={buttonStyle('panning')} onClick={() => setMode('panning')}>Pan (H)</button>
             <button style={buttonStyle('linking')} onClick={() => setMode('linking')}>Link (L)</button>
             <div style={{ borderLeft: '2px solid #4b5563', margin: '0 5px' }}></div>
+            <input value={searchTerm} onChange={(e) => setSearchTerm?.(e.target.value)} placeholder="Search nodes..." style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white' }} />
             <button style={buttonStyle('action', !temporal?.pastStates.length)} onClick={() => temporal?.undo()} >Undo</button>
             <button style={buttonStyle('action', !temporal?.futureStates.length)} onClick={() => temporal?.redo()} >Redo</button>
         </div>

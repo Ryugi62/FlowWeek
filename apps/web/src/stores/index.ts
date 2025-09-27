@@ -47,11 +47,13 @@ interface UiState {
   view: { x: number; y: number; zoom: number };
   mode: InteractionMode;
   selectedNodeIds: Set<number>;
+  searchTerm?: string;
   setView: (view: Partial<UiState['view']>) => void;
   setMode: (mode: InteractionMode) => void;
   toggleNodeSelection: (nodeId: number) => void;
   clearNodeSelection: () => void;
   selectNode: (nodeId: number, shiftKey: boolean) => void;
+  setSearchTerm?: (term: string) => void;
   // history methods added by withHistory wrapper
   undo?: () => void;
   redo?: () => void;
@@ -62,6 +64,7 @@ export const useUiStore = create<UiState & { undo?: () => void; redo?: () => voi
   view: { x: 0, y: 0, zoom: 1 },
   mode: 'select',
   selectedNodeIds: new Set<number>(),
+  searchTerm: '',
   setView: (newView: Partial<UiState['view']>) => set((state: UiState) => ({ view: { ...state.view, ...newView } })),
   setMode: (newMode: InteractionMode) => set({ mode: newMode }),
   toggleNodeSelection: (nodeId: number) => set((state: UiState) => {
@@ -84,6 +87,8 @@ export const useUiStore = create<UiState & { undo?: () => void; redo?: () => voi
       return { selectedNodeIds: new Set<number>([nodeId]) };
     }
   })
+  ,
+  setSearchTerm: (term: string) => set(() => ({ searchTerm: term })),
   }))
 );
 

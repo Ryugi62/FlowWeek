@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { Flow, Node, Edge } from '../App';
 import { useUiStore } from '../stores';
 import { useQueryClient } from '@tanstack/react-query';
-import { updateNode, createNode } from '../api';
+import { updateNode, createNode, createEdge, deleteNode } from '../api';
 
 interface CanvasProps {
   flows: Flow[];
@@ -21,6 +21,8 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const draggingRef = useRef<{ nodeId: number | null; offsetX: number; offsetY: number } | null>(null);
+  const groupDragRef = useRef<Map<number, { x: number; y: number }> | null>(null);
+  const linkingRef = useRef<{ fromId: number | null; toX: number; toY: number } | null>(null);
   const panRef = useRef<{ isPanning: boolean; startX: number; startY: number } | null>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const ui = useUiStore();
@@ -97,7 +99,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     });
 
     // render nodes
-    nodes.forEach(node => {
+    // apply search filter if present
+    const filtered = ui.searchTerm ? nodes.filter(n => (n.title || '').toLowerCase().includes((ui.searchTerm || '').toLowerCase())) : nodes;
+
+    filtered.forEach(node => {
       const selected = ui.selectedNodeIds.has(node.id);
       ctx.save();
       ctx.translate(node.x, node.y);
@@ -112,7 +117,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       ctx.font = `${14 / (ui.view.zoom)}px sans-serif`;
       ctx.fillText(node.title || 'Untitled', 8, 18 / (ui.view.zoom));
       ctx.restore();
-    });
+  });
 
   }, [ui.view.x, ui.view.y, ui.view.zoom, nodes, edges, size.w, size.h, ui.selectedNodeIds]);
 
@@ -151,11 +156,34 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         return;
       }
 
+      // linking start
+      if (ui.mode === 'linking') {
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          const n = nodes[i];
+          if (isPointInNode(p.x, p.y, n)) {
+            linkingRef.current = { fromId: n.id, toX: p.x, toY: p.y };
+            return;
+          }
+        }
+        return;
+      }
+
       // hit test nodes (top-most)
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
         if (isPointInNode(p.x, p.y, n)) {
           ui.selectNode(n.id, e.shiftKey);
+          // setup group drag snapshot if multiple selected
+          const selected = Array.from(ui.selectedNodeIds);
+          if (selected.length > 1 && ui.selectedNodeIds.has(n.id)) {
+            const snap = new Map<number, { x: number; y: number }>();
+            const all = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            selected.forEach(id => {
+              const nn = all.find(x => x.id === id);
+              if (nn) snap.set(id, { x: nn.x, y: nn.y });
+            });
+            groupDragRef.current = snap;
+          }
           draggingRef.current = { nodeId: n.id, offsetX: p.x - n.x, offsetY: p.y - n.y };
           return;
         }
@@ -174,13 +202,30 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         panRef.current.startY = e.clientY;
         return;
       }
+      if (linkingRef.current && linkingRef.current.fromId != null) {
+        const p = screenToWorld(e.clientX, e.clientY);
+        linkingRef.current.toX = p.x;
+        linkingRef.current.toY = p.y;
+        return;
+      }
+
       if (draggingRef.current && draggingRef.current.nodeId != null) {
         const p = screenToWorld(e.clientX, e.clientY);
         const nodeId = draggingRef.current.nodeId;
         const nx = p.x - draggingRef.current.offsetX;
         const ny = p.y - draggingRef.current.offsetY;
-        // optimistic local update
-        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => old.map(n => n.id === nodeId ? { ...n, x: nx, y: ny } : n));
+        const selected = Array.from(ui.selectedNodeIds);
+        if (selected.length > 1 && ui.selectedNodeIds.has(nodeId) && groupDragRef.current) {
+          const original = groupDragRef.current.get(nodeId);
+          if (original) {
+            const dx = nx - original.x;
+            const dy = ny - original.y;
+            queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => selected.includes(n.id) ? { ...n, x: n.x + dx, y: n.y + dy } : n));
+          }
+        } else {
+          // optimistic local update single
+          queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => old.map(n => n.id === nodeId ? { ...n, x: nx, y: ny } : n));
+        }
         return;
       }
     };
@@ -201,7 +246,16 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
             (async () => {
               const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]);
               try {
-                await updateNode(boardId, nodeId, { x: current.x, y: current.y });
+                const selected = Array.from(ui.selectedNodeIds);
+                if (selected.length > 1 && selected.includes(nodeId)) {
+                  const all = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+                  for (const id of selected) {
+                    const n = all.find(x => x.id === id);
+                    if (n) await updateNode(boardId, id, { x: n.x, y: n.y });
+                  }
+                } else {
+                  await updateNode(boardId, nodeId, { x: current.x, y: current.y });
+                }
                 queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
               } catch (err) {
                 // revert
@@ -211,8 +265,31 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           }
         }
       }
+      // finalize linking if any
+      if (linkingRef.current && linkingRef.current.fromId != null) {
+        const p = screenToWorld(e.clientX, e.clientY);
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          const n = nodes[i];
+          if (isPointInNode(p.x, p.y, n) && n.id !== linkingRef.current.fromId) {
+            const payload = { source_node_id: linkingRef.current.fromId, target_node_id: n.id };
+            const previous = queryClient.getQueryData<Edge[]>(['edges', boardId]) || [];
+            queryClient.setQueryData<Edge[]>(['edges', boardId], [...previous, { ...payload, id: -Date.now(), board_id: boardId } as Edge]);
+            (async () => {
+              try {
+                await createEdge(boardId, payload);
+                queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
+              } catch (err) {
+                queryClient.setQueryData<Edge[]>(['edges', boardId], previous);
+              }
+            })();
+            break;
+          }
+        }
+      }
       draggingRef.current = null;
       lastPointerId = null;
+      groupDragRef.current = null;
+      linkingRef.current = null;
     };
 
     const onDoubleClick = (e: MouseEvent) => {
@@ -262,6 +339,45 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     window.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('dblclick', onDoubleClick);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    // contextmenu for right-click actions
+    const onContext = (ev: MouseEvent) => {
+      ev.preventDefault();
+      const p = screenToWorld(ev.clientX, ev.clientY);
+      // hit test
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (isPointInNode(p.x, p.y, n)) {
+          // show a simple native menu via prompt (quick implementation)
+          const action = window.prompt('Context action for node ' + n.id + ' (duplicate/delete/cancel)');
+          if (action === 'duplicate') {
+            const payload = { board_id: boardId, flow_id: n.flow_id, type: n.type, title: n.title + ' (copy)', x: n.x + 20, y: n.y + 20, width: n.width, height: n.height };
+            const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            queryClient.setQueryData<Node[]>(['nodes', boardId], [...previous, { ...payload, id: -Date.now() } as Node]);
+            (async () => {
+              try {
+                await createNode(boardId, payload);
+                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              } catch (err) {
+                queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
+              }
+            })();
+          } else if (action === 'delete') {
+            const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            queryClient.setQueryData<Node[]>(['nodes', boardId], previous.filter(x => x.id !== n.id));
+            (async () => {
+              try {
+                await deleteNode(boardId, n.id);
+                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              } catch (err) {
+                queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
+              }
+            })();
+          }
+          return;
+        }
+      }
+    };
+    canvas.addEventListener('contextmenu', onContext);
 
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);
@@ -269,6 +385,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       window.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('dblclick', onDoubleClick);
       canvas.removeEventListener('wheel', onWheel as any);
+      canvas.removeEventListener('contextmenu', onContext as any);
     };
   }, [nodes, edges, ui.mode, ui.view.zoom, ui.view.x, ui.view.y, boardId, flows, onNodeDoubleClick, queryClient, ui]);
 
