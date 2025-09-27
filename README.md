@@ -43,6 +43,7 @@ flowweek/
 2. Install dependencies:
    ```bash
    npm install
+   npm run install:workspaces  # Install dependencies in each workspace
    ```
 
 3. Start development servers:
