@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  api:
+    build: ./apps/api
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./apps/api:/app
+      - /app/node_modules
+
+  web:
+    build: ./apps/web
+    ports:
+      - "80:80"
+    depends_on:
+      - api

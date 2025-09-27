@@ -1,0 +1,17 @@
+# Build outputs
+dist/
+build/
+
+# Environment variables
+.env.local
+.env.production
+
+# Logs
+*.log
+
+# Dependencies
+node_modules/
+
+# IDE
+.vscode/
+.idea/

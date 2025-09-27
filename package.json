@@ -2,7 +2,7 @@
   "name": "flowweek",
   "private": true,
   "version": "0.0.0",
-  "type": "module",
+  "workspaces": ["apps/*"],
   "scripts": {
     "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
     "dev:api": "cd apps/api && npm run dev",
@@ -12,28 +12,15 @@
     "build:web": "cd apps/web && npm run build",
     "lint": "npm run lint:api && npm run lint:web",
     "lint:api": "cd apps/api && npm run lint",
-    "lint:web": "cd apps/web && npm run lint"
-  },
-  "dependencies": {
-    "@tanstack/react-query": "^5.90.2",
-    "@timohausmann/quadtree-ts": "^2.2.2",
-    "axios": "^1.12.2",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "zustand": "^5.0.8"
+    "lint:web": "cd apps/web && npm run lint",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"apps/**/*.{ts,tsx,js,jsx,json,md}\"",
+    "test": "npm run test:api && npm run test:web",
+    "test:api": "cd apps/api && npm test",
+    "test:web": "cd apps/web && npm test"
   },
   "devDependencies": {
-    "@eslint/js": "^9.36.0",
-    "@types/react": "^19.1.13",
-    "@types/react-dom": "^19.1.9",
-    "@vitejs/plugin-react": "^5.0.3",
     "concurrently": "^8.2.2",
-    "eslint": "^9.36.0",
-    "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.20",
-    "globals": "^16.4.0",
-    "typescript": "~5.8.3",
-    "typescript-eslint": "^8.44.0",
-    "vite": "^7.1.7"
+    "prettier": "^3.3.3"
   }
 }
