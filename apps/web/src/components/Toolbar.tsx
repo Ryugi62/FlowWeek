@@ -1,19 +1,13 @@
 import React, { useEffect } from 'react';
 import { useUiStore } from '../stores';
 import type { InteractionMode } from '../stores';
-import { useStore } from 'zustand';
+ 
 import { useQueryClient } from '@tanstack/react-query';
 import { deleteNode } from '../api';
-
-// We need to get the temporal store directly to access undo/redo
-const useTemporalStore = (store: any) => {
-    const temporalStore = (useStore as any)(store, (state: any) => (state as any).temporal);
-    return temporalStore as any;
-};
+import { commandStack } from '../stores/commands';
 
 const Toolbar: React.FC = () => {
     const { mode, setMode } = useUiStore();
-    const temporal = useTemporalStore(useUiStore);
     const queryClient = useQueryClient();
     const { searchTerm = '', setSearchTerm } = useUiStore();
 
@@ -26,15 +20,9 @@ const Toolbar: React.FC = () => {
                 if (ids.length === 0) return;
                 // optimistic remove
                 const previous = queryClient.getQueryData<any>(['nodes', 1]) || [];
-                queryClient.setQueryData(['nodes', 1], (old = []) => (old as any[]).filter(n => !ids.includes(n.id)));
-                ids.forEach(async (id) => {
-                    try {
-                        await deleteNode(1, id);
-                    } catch (err) {
-                        // revert all on error
-                        queryClient.setQueryData(['nodes', 1], previous);
-                    }
-                });
+                const redo = () => queryClient.setQueryData(['nodes', 1], (old = []) => (old as any[]).filter(n => !ids.includes(n.id)));
+                const undo = () => queryClient.setQueryData(['nodes', 1], previous);
+                commandStack.execute({ redo: () => { redo(); ids.forEach(id => deleteNode(1, id).catch(()=>{})); }, undo });
                 state.clearNodeSelection();
             }
         };
@@ -71,8 +59,8 @@ const Toolbar: React.FC = () => {
             <button style={buttonStyle('linking')} onClick={() => setMode('linking')}>Link (L)</button>
             <div style={{ borderLeft: '2px solid #4b5563', margin: '0 5px' }}></div>
             <input value={searchTerm} onChange={(e) => setSearchTerm?.(e.target.value)} placeholder="Search nodes..." style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white' }} />
-            <button style={buttonStyle('action', !temporal?.pastStates.length)} onClick={() => temporal?.undo()} >Undo</button>
-            <button style={buttonStyle('action', !temporal?.futureStates.length)} onClick={() => temporal?.redo()} >Redo</button>
+            <button style={buttonStyle('action', !commandStack.canUndo())} onClick={() => commandStack.undo()} >Undo</button>
+            <button style={buttonStyle('action', !commandStack.canRedo())} onClick={() => commandStack.redo()} >Redo</button>
         </div>
     );
 };

@@ -3,6 +3,7 @@ import type { Flow, Node, Edge } from '../App';
 import { useUiStore } from '../stores';
 import { useQueryClient } from '@tanstack/react-query';
 import { updateNode, createNode, createEdge, deleteNode, deleteEdge } from '../api';
+import { commandStack } from '../stores/commands';
 
 interface CanvasProps {
   flows: Flow[];
@@ -24,10 +25,12 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const groupDragRef = useRef<Map<number, { x: number; y: number }> | null>(null);
   const linkingRef = useRef<{ fromId: number | null; toX: number; toY: number } | null>(null);
   const panRef = useRef<{ isPanning: boolean; startX: number; startY: number } | null>(null);
+  const moveSnapshotRef = useRef<Map<number, { x: number; y: number }> | null>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const ui = useUiStore();
   const queryClient = useQueryClient();
   const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null);
+  const [hoverNodeId, setHoverNodeId] = useState<number | null>(null);
 
   // We'll perform manual optimistic updates using queryClient and direct api calls
 
@@ -140,6 +143,8 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       }
     }
 
+    // draw node handle (small circle on right side)
+
     // render nodes
     // apply search filter if present
     const filtered = ui.searchTerm ? nodes.filter(n => (n.title || '').toLowerCase().includes((ui.searchTerm || '').toLowerCase())) : nodes;
@@ -160,6 +165,16 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       ctx.fillText(node.title || 'Untitled', 8, 18 / (ui.view.zoom));
       ctx.restore();
   });
+
+    // draw handles after nodes
+    filtered.forEach(node => {
+      const hx = node.x + node.width + 8;
+      const hy = node.y + node.height / 2;
+      ctx.beginPath();
+      ctx.fillStyle = hoverNodeId === node.id ? '#60a5fa' : '#9ca3af';
+      ctx.arc(hx, hy, 8 / (ui.view.zoom * DPR), 0, Math.PI * 2);
+      ctx.fill();
+    });
 
   }, [ui.view.x, ui.view.y, ui.view.zoom, nodes, edges, size.w, size.h, ui.selectedNodeIds]);
 
@@ -219,6 +234,18 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         return;
       }
 
+      // detect handle hit (small circle on right side of node) to start linking regardless of mode
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        const hx = n.x + n.width + 8;
+        const hy = n.y + n.height / 2;
+        const rworld = 8 / ui.view.zoom;
+        if (Math.hypot(p.x - hx, p.y - hy) <= rworld) {
+          linkingRef.current = { fromId: n.id, toX: p.x, toY: p.y };
+          return;
+        }
+      }
+
       // hit test nodes (top-most)
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
@@ -234,8 +261,17 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
               if (nn) snap.set(id, { x: nn.x, y: nn.y });
             });
             groupDragRef.current = snap;
+            moveSnapshotRef.current = snap;
           }
           draggingRef.current = { nodeId: n.id, offsetX: p.x - n.x, offsetY: p.y - n.y };
+          // if single node drag, capture its original position
+          if (!moveSnapshotRef.current) {
+            const current = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            const nn = current.find(x => x.id === n.id);
+            const map = new Map<number, { x: number; y: number }>();
+            if (nn) map.set(nn.id, { x: nn.x, y: nn.y });
+            moveSnapshotRef.current = map;
+          }
           return;
         }
       }
@@ -260,6 +296,18 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         linkingRef.current.toY = p.y;
         return;
       }
+
+      // hover handle detection
+      const hw = screenToWorld(e.clientX, e.clientY);
+      let foundHover: number | null = null;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        const hx = n.x + n.width + 8;
+        const hy = n.y + n.height / 2;
+        const rworld = 8 / ui.view.zoom;
+        if (Math.hypot(hw.x - hx, hw.y - hy) <= rworld) { foundHover = n.id; break; }
+      }
+      if (foundHover !== hoverNodeId) setHoverNodeId(foundHover);
 
       if (draggingRef.current && draggingRef.current.nodeId != null) {
         const p = screenToWorld(e.clientX, e.clientY);
@@ -291,30 +339,32 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         const nodeId = draggingRef.current.nodeId;
         const node = nodes.find(n => n.id === nodeId);
         if (node) {
-          // find current cached node and send PATCH
-          const current = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(n => n.id === nodeId);
-          if (current) {
-            // optimistic: already set in cache during drag; ensure backend is updated
-            (async () => {
-              const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]);
-              try {
-                const selected = Array.from(ui.selectedNodeIds);
-                if (selected.length > 1 && selected.includes(nodeId)) {
-                  const all = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
-                  for (const id of selected) {
-                    const n = all.find(x => x.id === id);
-                    if (n) await updateNode(boardId, id, { x: n.x, y: n.y });
-                  }
-                } else {
-                  await updateNode(boardId, nodeId, { x: current.x, y: current.y });
-                }
-                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
-              } catch (err) {
-                // revert
-                if (previous) queryClient.setQueryData(['nodes', boardId], previous);
-              }
-            })();
+          // build previous and next position maps for command
+          const prevMap = moveSnapshotRef.current || new Map<number, { x: number; y: number }>();
+          const cached = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+          const nextMap = new Map<number, { x: number; y: number }>();
+          const selected = Array.from(ui.selectedNodeIds);
+          if (selected.length > 1 && ui.selectedNodeIds.has(nodeId)) {
+            for (const id of selected) {
+              const nn = cached.find(x => x.id === id);
+              if (nn) nextMap.set(id, { x: nn.x, y: nn.y });
+            }
+          } else {
+            const nn = cached.find(x => x.id === nodeId);
+            if (nn) nextMap.set(nodeId, { x: nn.x, y: nn.y });
           }
+
+          const redo = () => {
+            queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => nextMap.has(n.id) ? { ...n, x: nextMap.get(n.id)!.x, y: nextMap.get(n.id)!.y } : n));
+            // persist to server in background
+            nextMap.forEach((pos, id) => { updateNode(boardId, id, pos).catch(()=>{}); });
+          };
+          const undo = () => {
+            queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => prevMap.has(n.id) ? { ...n, x: prevMap.get(n.id)!.x, y: prevMap.get(n.id)!.y } : n));
+            prevMap.forEach((pos, id) => { updateNode(boardId, id, pos).catch(()=>{}); });
+          };
+          commandStack.execute({ redo, undo });
+          moveSnapshotRef.current = null;
         }
       }
       // finalize linking if any
@@ -324,16 +374,16 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           const n = nodes[i];
           if (isPointInNode(p.x, p.y, n) && n.id !== linkingRef.current.fromId) {
             const payload = { source_node_id: linkingRef.current.fromId, target_node_id: n.id };
-            const previous = queryClient.getQueryData<Edge[]>(['edges', boardId]) || [];
-            queryClient.setQueryData<Edge[]>(['edges', boardId], [...previous, { ...payload, id: -Date.now(), board_id: boardId } as Edge]);
-            (async () => {
-              try {
-                await createEdge(boardId, payload);
-                queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
-              } catch (err) {
-                queryClient.setQueryData<Edge[]>(['edges', boardId], previous);
-              }
-            })();
+            const tempEdge = { ...payload, id: -Date.now(), board_id: boardId } as Edge;
+            const redo = () => {
+              queryClient.setQueryData<Edge[]>(['edges', boardId], [...(queryClient.getQueryData<Edge[]>(['edges', boardId]) || []), tempEdge]);
+              // fire background create (server will broadcast)
+              createEdge(boardId, payload).catch(() => {});
+            };
+            const undo = () => {
+              queryClient.setQueryData<Edge[]>(['edges', boardId], (queryClient.getQueryData<Edge[]>(['edges', boardId]) || []).filter(x => x.id !== tempEdge.id));
+            };
+            commandStack.execute({ redo, undo });
             break;
           }
         }
@@ -410,6 +460,22 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     const onContext = (ev: MouseEvent) => {
       ev.preventDefault();
       const p = screenToWorld(ev.clientX, ev.clientY);
+      // build DOM context menu
+      const container = canvas.parentElement || document.body;
+      const menu = document.createElement('div');
+      menu.style.position = 'absolute';
+      menu.style.left = ev.clientX + 'px';
+      menu.style.top = ev.clientY + 'px';
+      menu.style.background = '#0f172a';
+      menu.style.color = 'white';
+      menu.style.padding = '6px';
+      menu.style.border = '1px solid #374151';
+      menu.style.borderRadius = '6px';
+      menu.style.zIndex = '9999';
+
+      const removeMenu = () => { menu.remove(); window.removeEventListener('click', removeMenu); };
+
+      // edge actions
       for (let ei = edges.length - 1; ei >= 0; ei--) {
         const e = edges[ei];
         const s = nodes.find(n => n.id === e.source_node_id);
@@ -422,23 +488,24 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         const dx = Math.abs(x2 - x1);
         const dir = x2 > x1 ? 1 : -1;
         const cp1x = x1 + dir * dx * 0.25;
-        const cp1y = y1;
+        const cp1y = y1 + ((y2 - y1) * 0.12);
         const cp2x = x2 - dir * dx * 0.25;
-        const cp2y = y2;
+        const cp2y = y2 - ((y2 - y1) * 0.12);
         if (isPointNearBezier(x1,y1,cp1x,cp1y,cp2x,cp2y,x2,y2,p.x,p.y)){
-          const action = window.prompt('Context action for edge ' + e.id + ' (delete/cancel)');
-          if (action === 'delete'){
-            const previous = queryClient.getQueryData<Edge[]>(['edges', boardId]) || [];
-            queryClient.setQueryData<Edge[]>(['edges', boardId], previous.filter(x => x.id !== e.id));
-            (async () => {
-              try {
-                await deleteEdge(boardId, e.id);
-                queryClient.invalidateQueries({ queryKey: ['edges', boardId] });
-              } catch (err) {
-                queryClient.setQueryData<Edge[]>(['edges', boardId], previous);
-              }
-            })();
-          }
+          const del = document.createElement('div');
+          del.textContent = 'Delete edge';
+          del.style.padding = '6px 10px';
+          del.style.cursor = 'pointer';
+          del.onclick = () => {
+            const current = queryClient.getQueryData<Edge[]>(['edges', boardId]) || [];
+            const redo = () => queryClient.setQueryData<Edge[]>(['edges', boardId], (queryClient.getQueryData<Edge[]>(['edges', boardId]) || []).filter(x => x.id !== e.id));
+            const undo = () => queryClient.setQueryData<Edge[]>(['edges', boardId], current);
+            commandStack.execute({ redo: () => { redo(); deleteEdge(boardId, e.id).catch(()=>{}); }, undo });
+            removeMenu();
+          };
+          menu.appendChild(del);
+          container.appendChild(menu);
+          window.addEventListener('click', removeMenu);
           return;
         }
       }
@@ -447,32 +514,33 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
         if (isPointInNode(p.x, p.y, n)) {
-          // show a simple native menu via prompt (quick implementation)
-          const action = window.prompt('Context action for node ' + n.id + ' (duplicate/delete/cancel)');
-          if (action === 'duplicate') {
+          const dup = document.createElement('div');
+          dup.textContent = 'Duplicate node';
+          dup.style.padding = '6px 10px';
+          dup.style.cursor = 'pointer';
+          dup.onclick = () => {
             const payload = { board_id: boardId, flow_id: n.flow_id, type: n.type, title: n.title + ' (copy)', x: n.x + 20, y: n.y + 20, width: n.width, height: n.height };
-            const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
-            queryClient.setQueryData<Node[]>(['nodes', boardId], [...previous, { ...payload, id: -Date.now() } as Node]);
-            (async () => {
-              try {
-                await createNode(boardId, payload);
-                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
-              } catch (err) {
-                queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
-              }
-            })();
-          } else if (action === 'delete') {
-            const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
-            queryClient.setQueryData<Node[]>(['nodes', boardId], previous.filter(x => x.id !== n.id));
-            (async () => {
-              try {
-                await deleteNode(boardId, n.id);
-                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
-              } catch (err) {
-                queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
-              }
-            })();
-          }
+            const temp = { ...payload, id: -Date.now() } as Node;
+            const redo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], [...(queryClient.getQueryData<Node[]>(['nodes', boardId]) || []), temp]);
+            const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).filter(x => x.id !== temp.id));
+            commandStack.execute({ redo: () => { redo(); createNode(boardId, payload).catch(()=>{}); }, undo });
+            removeMenu();
+          };
+          const del = document.createElement('div');
+          del.textContent = 'Delete node';
+          del.style.padding = '6px 10px';
+          del.style.cursor = 'pointer';
+          del.onclick = () => {
+            const current = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            const redo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).filter(x => x.id !== n.id));
+            const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], current);
+            commandStack.execute({ redo: () => { redo(); deleteNode(boardId, n.id).catch(()=>{}); }, undo });
+            removeMenu();
+          };
+          menu.appendChild(dup);
+          menu.appendChild(del);
+          container.appendChild(menu);
+          window.addEventListener('click', removeMenu);
           return;
         }
       }
