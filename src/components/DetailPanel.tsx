@@ -1,21 +1,36 @@
-
 import { useState, useEffect } from 'react';
-
-interface Node {
-    id: number;
-    title: string;
-    content?: string;
-}
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import apiClient from '../api';
+import type { Node } from '../App';
 
 interface DetailPanelProps {
     node: Node | null;
-    onSave: (nodeId: number, updates: { title?: string; content?: string }) => void;
+    boardId: number;
     onClose: () => void;
 }
 
-const DetailPanel = ({ node, onSave, onClose }: DetailPanelProps) => {
+const updateNode = async (updatedNode: { id: number, title?: string, content?: string }) => {
+    const { data } = await apiClient.patch(`/nodes/${updatedNode.id}`, updatedNode);
+    return data.data;
+};
+
+const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
     const [title, setTitle] = useState('');
     const [content, setContent] = useState('');
+    const queryClient = useQueryClient();
+
+    const mutation = useMutation({ 
+        mutationFn: updateNode,
+        onSuccess: (updatedNode) => {
+            queryClient.setQueryData(['nodes', boardId], (old: Node[] | undefined) => 
+                old ? old.map(n => n.id === updatedNode.id ? updatedNode : n) : []
+            );
+            onClose();
+        },
+        onError: (error) => {
+            console.error("Failed to save node:", error);
+        }
+    });
 
     useEffect(() => {
         if (node) {
@@ -29,7 +44,7 @@ const DetailPanel = ({ node, onSave, onClose }: DetailPanelProps) => {
     }
 
     const handleSave = () => {
-        onSave(node.id, { title, content });
+        mutation.mutate({ id: node.id, title, content });
     };
 
     const panelStyle: React.CSSProperties = {
@@ -63,7 +78,9 @@ const DetailPanel = ({ node, onSave, onClose }: DetailPanelProps) => {
                 style={{ flexGrow: 1, padding: '8px', background: '#374151', border: '1px solid #4b5563', borderRadius: '4px', color: 'white', resize: 'none' }}
             />
             <div>
-                <button onClick={handleSave} style={{ padding: '8px 12px', background: '#3b82f6', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Save</button>
+                <button onClick={handleSave} disabled={mutation.isPending} style={{ padding: '8px 12px', background: '#3b82f6', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+                    {mutation.isPending ? 'Saving...' : 'Save'}
+                </button>
                 <button onClick={onClose} style={{ marginLeft: '10px', padding: '8px 12px', background: '#4b5563', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Close</button>
             </div>
         </div>
