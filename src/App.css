@@ -1,0 +1,38 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background-color: #1a1a1a;
+}
+
+.header {
+  padding: 8px 24px;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.header h1 {
+  font-size: 1.5em;
+  font-weight: 600;
+  color: #fafafa;
+  margin: 0;
+}
+
+.toolbar {
+  padding: 8px 24px;
+  border-bottom: 1px solid #3a3a3a;
+  display: flex;
+  gap: 8px;
+}
+
+.canvas-container {
+  flex-grow: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.canvas-container canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
