@@ -1,10 +1,17 @@
 
 import axios from 'axios';
 import type { Edge, Node } from '../types';
+import { getOrCreateClientId } from '../utils/clientId';
+
+type WsEnvelopeMeta = {
+  clientId?: string;
+  timestamp?: string;
+};
 
 type WsMessage = {
   type: string;
   data?: unknown;
+  meta?: WsEnvelopeMeta;
 };
 
 type WsListener = (message: WsMessage) => void;
@@ -25,6 +32,25 @@ export type WsConnection = {
   close: () => void;
 };
 
+let cachedClientId: string | null = null;
+
+export const setApiClientId = (id: string) => {
+  cachedClientId = id;
+  apiClient.defaults.headers.common['x-client-id'] = id;
+};
+
+const resolveClientId = () => {
+  if (cachedClientId) return cachedClientId;
+  const generated = getOrCreateClientId();
+  setApiClientId(generated);
+  return generated;
+};
+
+const withClientHeaders = (headers: Record<string, string> = {}) => ({
+  ...headers,
+  'x-client-id': resolveClientId(),
+});
+
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
   headers: {
@@ -35,11 +61,17 @@ const apiClient = axios.create({
 export default apiClient;
 
 // Convenience CRUD helpers for frontend canvas operations
-type NodeWritePayload = Partial<Omit<Node, 'id' | 'board_id'>>;
+type NodeWritePayload = Partial<Omit<Node, 'id' | 'board_id' | 'updated_at'>>;
 type EdgeWritePayload = Partial<Omit<Edge, 'id' | 'board_id'>>;
 
+interface UpdateOptions {
+  version?: string | null;
+}
+
 export const createNode = async (boardId: number, payload: NodeWritePayload) => {
-  const res = await apiClient.post(`/boards/${boardId}/nodes`, payload);
+  const res = await apiClient.post(`/boards/${boardId}/nodes`, payload, {
+    headers: withClientHeaders(),
+  });
   return res.data;
 };
 
@@ -47,23 +79,34 @@ export const updateNode = async (
   boardId: number,
   nodeId: number,
   payload: NodeWritePayload,
+  options: UpdateOptions = {},
 ) => {
-  const res = await apiClient.patch(`/boards/${boardId}/nodes/${nodeId}`, payload);
+  const headers = withClientHeaders();
+  if (options.version) headers['x-node-version'] = options.version;
+  const res = await apiClient.patch(`/boards/${boardId}/nodes/${nodeId}`, payload, {
+    headers,
+  });
   return res.data;
 };
 
 export const deleteNode = async (boardId: number, nodeId: number) => {
-  const res = await apiClient.delete(`/boards/${boardId}/nodes/${nodeId}`);
+  const res = await apiClient.delete(`/boards/${boardId}/nodes/${nodeId}`, {
+    headers: withClientHeaders(),
+  });
   return res.data;
 };
 
 export const createEdge = async (boardId: number, payload: EdgeWritePayload) => {
-  const res = await apiClient.post(`/boards/${boardId}/edges`, payload);
+  const res = await apiClient.post(`/boards/${boardId}/edges`, payload, {
+    headers: withClientHeaders(),
+  });
   return res.data;
 };
 
 export const deleteEdge = async (boardId: number, edgeId: number) => {
-  const res = await apiClient.delete(`/boards/${boardId}/edges/${edgeId}`);
+  const res = await apiClient.delete(`/boards/${boardId}/edges/${edgeId}`, {
+    headers: withClientHeaders(),
+  });
   return res.data;
 };
 
@@ -72,13 +115,16 @@ export const updateEdge = async (
   edgeId: number,
   payload: EdgeWritePayload,
 ) => {
-  const res = await apiClient.patch(`/boards/${boardId}/edges/${edgeId}`, payload);
+  const res = await apiClient.patch(`/boards/${boardId}/edges/${edgeId}`, payload, {
+    headers: withClientHeaders(),
+  });
   return res.data;
 };
 
 // Simple WebSocket listener for development collaboration
-export function connectWs(onMessage: WsListener): WsConnection | null {
+export function connectWs(clientId: string, onMessage: WsListener): WsConnection | null {
   const url = import.meta.env.VITE_WS_URL?.trim() || DEFAULT_WS_URL;
+  setApiClientId(clientId);
 
   try {
     let socket: WebSocket | null = null;
@@ -113,6 +159,13 @@ export function connectWs(onMessage: WsListener): WsConnection | null {
         devLogOnce('ws-open', () => console.info(`[flowweek] websocket connected (${url})`));
         attempt = 0;
         cleanupTimer();
+        try {
+          socket?.send(
+            JSON.stringify({ type: 'client:hello', clientId, timestamp: new Date().toISOString() }),
+          );
+        } catch {
+          // ignore
+        }
       });
       socket.addEventListener('message', event => {
         if (typeof event.data !== 'string') return;

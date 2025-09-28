@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useSyncExternalStore } from 'react';
 import { useUiStore } from '../stores';
-import type { InteractionMode } from '../stores';
- 
+import type { InteractionMode, StatusFilter } from '../stores';
+import type { Node } from '../types';
 import { useQueryClient } from '@tanstack/react-query';
 import { deleteNode } from '../api';
 import { commandStack } from '../stores/commands';
@@ -50,10 +50,20 @@ const Toolbar: React.FC = () => {
                 const ids = Array.from(state.selectedNodeIds);
                 if (ids.length === 0) return;
                 // optimistic remove
-                const previous = queryClient.getQueryData<any>(['nodes', 1]) || [];
-                const redo = () => queryClient.setQueryData(['nodes', 1], (old = []) => (old as any[]).filter(n => !ids.includes(n.id)));
-                const undo = () => queryClient.setQueryData(['nodes', 1], previous);
-                commandStack.execute({ redo: () => { redo(); ids.forEach(id => deleteNode(1, id).catch(()=>{})); }, undo });
+                const boardId = 1;
+                const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+                const redo = () =>
+                    queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+                        (old || []).filter(n => !ids.includes(n.id))
+                    );
+                const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
+                commandStack.execute({
+                    redo: () => {
+                        redo();
+                        ids.forEach(id => deleteNode(boardId, id).catch(() => {}));
+                    },
+                    undo,
+                });
                 state.clearNodeSelection();
             }
         };
@@ -99,7 +109,7 @@ const Toolbar: React.FC = () => {
             />
             <select
                 value={statusFilter ?? 'all'}
-                onChange={(e) => setStatusFilter(e.target.value as any)}
+                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
                 style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white' }}
             >
                 <option value="all">All status</option>

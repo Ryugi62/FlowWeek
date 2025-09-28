@@ -80,9 +80,9 @@ VITE_WS_URL=ws://localhost:3001 # optional: enable realtime previews
 
 ### API Scripts
 - `npm run dev:api` - Start API server with hot reload
-- `npm run db:dev` - Run Prisma migrations against the local SQLite database
-- `npm run db:migrate` - Apply pending migrations (useful in CI/deploys)
-- `npm run db:seed` - Seed the database with sample board/flow data
+- `npm run db:dev --workspace apps/api` - Run Prisma migrations against the local SQLite database
+- `npm run db:migrate --workspace apps/api` - Apply pending migrations (useful in CI/deploys)
+- `npm run db:seed --workspace apps/api` - Seed the database with sample board/flow data
 - `npm run build:api` - Build API for production
 - `npm run test:api` - Run API tests
 
@@ -121,6 +121,12 @@ GitHub Actions automatically runs:
 - `GET /api/boards/:boardId/edges` - Get edges for a board
 - `POST /api/boards/:boardId/nodes/bulk` - (development only) generate up to 500 nodes for performance testing
 - Standard CRUD endpoints exist for nodes and edges via `POST/PATCH/DELETE`
+- WebSocket broadcasts include `{ meta: { clientId, timestamp } }` so clients can suppress their own echoes
+
+## Further Reading
+
+- [`docs/performance.md`](docs/performance.md) – reproducible FPS/input-latency workflow using the new bulk endpoint and canvas HUD
+- [`docs/deployment.md`](docs/deployment.md) – end-to-end deployment checklist (env vars, Prisma commands, build output, Docker notes)
 
 ## Contributing
 

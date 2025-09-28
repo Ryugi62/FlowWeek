@@ -1,4 +1,4 @@
-/// <reference path="../testGlobals.d.ts" />
+import { describe, it, expect } from '@jest/globals';
 import type { Node } from '../types';
 import { filterNodes } from './filterNodes';
 
@@ -18,6 +18,7 @@ const baseNode = (overrides: PartialNode): Node => ({
   height: 120,
   title: 'Untitled',
   content: '',
+  updated_at: new Date().toISOString(),
   ...overrides,
 });
 

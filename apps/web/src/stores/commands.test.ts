@@ -1,4 +1,4 @@
-/// <reference path="../testGlobals.d.ts" />
+import { describe, it, expect } from '@jest/globals';
 import { CommandStack } from './commands';
 
 describe('CommandStack', () => {

@@ -3,13 +3,14 @@ import InfiniteCanvas from './components/InfiniteCanvas';
 import DetailPanel from './components/DetailPanel';
 import Toolbar from './components/Toolbar';
 import { useQuery } from '@tanstack/react-query';
-import apiClient, { connectWs, updateNode as updateNodeApi } from './api';
+import apiClient, { connectWs, updateNode as updateNodeApi, setApiClientId } from './api';
 import type { WsMessage } from './api';
 import { queryClient } from './stores';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useUiStore } from './stores';
 import { commandStack } from './stores/commands';
 import type { Flow, Node, Edge } from './types';
+import { getOrCreateClientId } from './utils/clientId';
 
 // API fetch functions
 // ... (fetch functions remain the same)
@@ -17,6 +18,11 @@ import type { Flow, Node, Edge } from './types';
 function App() {
   const boardId = 1; // Placeholder
   const [editingNodeId, setEditingNodeId] = useState<number | null>(null);
+  const clientId = useMemo(() => {
+    const id = getOrCreateClientId();
+    setApiClientId(id);
+    return id;
+  }, []);
 
   const applyNodeTransform = useCallback(
     (builder: (nodes: Node[]) => Map<number, Partial<Node>>) => {
@@ -175,8 +181,9 @@ function App() {
 
   // connect to ws for live updates (development)
   useEffect(() => {
-    const connection = connectWs((msg: WsMessage) => {
+    const connection = connectWs(clientId, (msg: WsMessage) => {
       if (!msg?.type || msg.type === 'connection:ack') return;
+      if (msg.meta?.clientId && msg.meta.clientId === clientId) return;
       // granular updates for nodes
       if (msg.type === 'node:created') {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => [...(old || []), msg.data]);
@@ -204,7 +211,7 @@ function App() {
     return () => {
       connection?.close();
     };
-  }, [boardId]);
+  }, [boardId, clientId]);
 
   const editingNode = nodes.find(n => n.id === editingNodeId) || null;
 
@@ -248,6 +255,7 @@ const fetchNodes = async (boardId: number) => {
     tags?: unknown;
     content?: unknown;
     status?: unknown;
+    updated_at?: unknown;
   };
   const rows: NodeResponse[] = res.data.data || [];
   return rows.map<Node>(node => ({
@@ -261,6 +269,10 @@ const fetchNodes = async (boardId: number) => {
         : node.type === 'task'
         ? 'todo'
         : null,
+    updated_at:
+      typeof node.updated_at === 'string'
+        ? node.updated_at
+        : new Date().toISOString(),
   }));
 };
 const fetchEdges = async (boardId: number) => {

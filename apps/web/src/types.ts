@@ -22,6 +22,7 @@ export interface Node {
   height: number;
   title: string;
   content?: string;
+  updated_at: string;
 }
 
 export interface Edge {

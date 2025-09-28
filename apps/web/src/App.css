@@ -32,12 +32,14 @@
   position: relative;
   overflow: hidden;
   min-height: 0;
+  touch-action: none;
 }
 
 .canvas-container canvas {
   position: absolute;
   top: 0;
   left: 0;
+  touch-action: none;
 }
 
 @media (max-width: 900px) {

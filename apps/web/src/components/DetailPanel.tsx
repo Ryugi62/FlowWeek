@@ -89,6 +89,7 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
     const currentNodes = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
     const latest = currentNodes.find(n => n.id === node.id) || node;
     const previous = { ...latest };
+    const version = latest.updated_at;
     const nextNode: Node = {
       ...latest,
       type,
@@ -121,13 +122,17 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
           (old || []).map(n => (n.id === nextNode.id ? nextNode : n)),
         );
-        updateNodeApi(boardId, nextNode.id, payload).catch(() => {});
+        updateNodeApi(boardId, nextNode.id, payload, { version }).catch(() => {
+          queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+        });
       },
       undo: () => {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
           (old || []).map(n => (n.id === previous.id ? previous : n)),
         );
-        updateNodeApi(boardId, previous.id, revertPayload).catch(() => {});
+        updateNodeApi(boardId, previous.id, revertPayload).catch(() => {
+          queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+        });
       },
     });
 

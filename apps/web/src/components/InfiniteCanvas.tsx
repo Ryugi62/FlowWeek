@@ -93,6 +93,10 @@ interface GroupResizeState {
   lastApplied: Map<number, { x: number; y: number; width: number; height: number }> | null;
 }
 
+type MetricsSnapshot = { fps: number; nodes: number; edges: number; selection: number };
+
+const getFlowweekWindow = () => window as Window & { __FLOWWEEK?: { metrics?: MetricsSnapshot } };
+
 const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, onNodeDoubleClick }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -106,8 +110,20 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const selectionBoundsRef = useRef<SelectionBounds | null>(null);
   const groupResizeRef = useRef<GroupResizeState | null>(null);
   const visibleNodeIdsRef = useRef<Set<number>>(new Set());
-  const [size, setSize] = useState({ w: 800, h: 600 });
+  const activeTouchesRef = useRef<Map<number, { clientX: number; clientY: number }>>(new Map());
+  const pinchStateRef = useRef<{ distance: number; zoom: number; anchor: { x: number; y: number } } | null>(null);
+  const primaryPointerIdRef = useRef<number | null>(null);
   const ui = useUiStore();
+  const selectionCount = ui.selectedNodeIds.size;
+  const [metrics, setMetrics] = useState<MetricsSnapshot>({ fps: 0, nodes: nodes.length, edges: edges.length, selection: selectionCount });
+
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    const fw = getFlowweekWindow();
+    fw.__FLOWWEEK = {
+      ...(fw.__FLOWWEEK ?? {}),
+      metrics,
+    };
+  }
   const queryClient = useQueryClient();
   const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null);
   const [hoverNodeId, setHoverNodeId] = useState<number | null>(null);
@@ -128,7 +144,6 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       el.height = Math.max(200, Math.floor(rect.height * DPR));
       el.style.width = rect.width + 'px';
       el.style.height = rect.height + 'px';
-      setSize({ w: el.width, h: el.height });
     };
     resize();
     const ro = new ResizeObserver(resize);
@@ -432,10 +447,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     ui.tagFilters,
     nodes,
     edges,
-    size.w,
-    size.h,
     ui.selectedNodeIds,
     hoverHandle,
+    hoverNodeId,
+    selectedEdgeId,
   ]);
 
   useEffect(() => {
@@ -447,8 +462,58 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
   }, [draw]);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    let frameId = 0;
+    let frameCount = 0;
+    let lastTime = performance.now();
+
+    const measure = () => {
+      frameCount += 1;
+      frameId = requestAnimationFrame(measure);
+    };
+
+    frameId = requestAnimationFrame(measure);
+    const intervalId = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - lastTime || 1;
+      const fps = Math.round((frameCount * 1000) / elapsed);
+      frameCount = 0;
+      lastTime = now;
+      const next = {
+        fps,
+        nodes: nodes.length,
+        edges: edges.length,
+        selection: selectionCount,
+      };
+      setMetrics(prev => {
+        if (
+          prev.fps === next.fps &&
+          prev.nodes === next.nodes &&
+          prev.edges === next.edges &&
+          prev.selection === next.selection
+        ) {
+          return prev;
+        }
+        if (typeof window !== 'undefined') {
+          const fw = getFlowweekWindow();
+          fw.__FLOWWEEK = {
+            ...(fw.__FLOWWEEK ?? {}),
+            metrics: next,
+          };
+        }
+        return next;
+      });
+    }, 1000);
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.clearInterval(intervalId);
+    };
+  }, [nodes.length, edges.length, selectionCount]);
+
   // Helpers to convert between screen and world coords
-  const screenToWorld = (sx: number, sy: number) => {
+  const screenToWorld = useCallback((sx: number, sy: number) => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return { x: sx, y: sy };
@@ -458,14 +523,16 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     const x = (sx - rect.left - canvas.width / (2 * DPR)) / ui.view.zoom + ui.view.x;
     const y = (sy - rect.top - canvas.height / (2 * DPR)) / ui.view.zoom + ui.view.y;
     return { x, y };
-  };
+  }, [ui.view.x, ui.view.y, ui.view.zoom]);
 
   // Pointer events
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    let lastPointerId: number | null = null;
+    activeTouchesRef.current.clear();
+    pinchStateRef.current = null;
+    primaryPointerIdRef.current = null;
 
     const hitResizeHandle = (point: { x: number; y: number }): ResizeHandle | null => {
       const bounds = selectionBoundsRef.current;
@@ -556,21 +623,52 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
             (old || []).map(node => (updates.has(node.id) ? { ...node, ...updates.get(node.id)! } : node)),
           );
-          updates.forEach((val, id) => updateNode(boardId, id, val).catch(() => {}));
+          const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+          updates.forEach((val, id) => {
+            const version = latest.find(node => node.id === id)?.updated_at;
+            updateNode(boardId, id, val, { version }).catch(() => {
+              queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+            });
+          });
         },
         undo: () => {
           queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
             (old || []).map(node => (prev.has(node.id) ? { ...node, ...prev.get(node.id)! } : node)),
           );
-          prev.forEach((val, id) => updateNode(boardId, id, val).catch(() => {}));
+          const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+          prev.forEach((val, id) => {
+            const version = latest.find(node => node.id === id)?.updated_at;
+            updateNode(boardId, id, val, { version }).catch(() => {
+              queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+            });
+          });
         },
       });
       groupResizeRef.current = null;
     };
 
     const onPointerDown = (e: PointerEvent) => {
-      (e.target as Element).setPointerCapture?.(e.pointerId);
-      lastPointerId = e.pointerId;
+      canvas.setPointerCapture?.(e.pointerId);
+      if (primaryPointerIdRef.current === null) {
+        primaryPointerIdRef.current = e.pointerId;
+      }
+      if (e.pointerType === 'touch') {
+        activeTouchesRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+        if (activeTouchesRef.current.size === 2) {
+          const touches = Array.from(activeTouchesRef.current.values());
+          const [a, b] = touches;
+          const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+          if (distance > 0) {
+            const centerX = (a.clientX + b.clientX) / 2;
+            const centerY = (a.clientY + b.clientY) / 2;
+            pinchStateRef.current = {
+              distance,
+              zoom: ui.view.zoom,
+              anchor: screenToWorld(centerX, centerY),
+            };
+          }
+        }
+      }
       const p = screenToWorld(e.clientX, e.clientY);
       // check edge hit first
       const hitEdge = pointerEdgeHitTest(e.clientX, e.clientY);
@@ -688,7 +786,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
                       node.id === target.id ? { ...node, status: nextStatus } : node,
                     ),
                   );
-                  updateNode(boardId, target.id, { status: nextStatus }).catch(() => {});
+                  const version = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(node => node.id === target.id)?.updated_at;
+                  updateNode(boardId, target.id, { status: nextStatus }, { version }).catch(() => {
+                    queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+                  });
                 },
                 undo: () => {
                   queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
@@ -696,7 +797,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
                       node.id === target.id ? { ...node, status: prevStatus } : node,
                     ),
                   );
-                  updateNode(boardId, target.id, { status: prevStatus }).catch(() => {});
+                  const version = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(node => node.id === target.id)?.updated_at;
+                  updateNode(boardId, target.id, { status: prevStatus }, { version }).catch(() => {
+                    queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+                  });
                 },
               });
               return;
@@ -734,7 +838,42 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (lastPointerId !== null && e.pointerId !== lastPointerId) return;
+      if (e.pointerType === 'touch') {
+        activeTouchesRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+        const touches = Array.from(activeTouchesRef.current.values());
+        if (touches.length >= 2) {
+          const [a, b] = touches.slice(0, 2);
+          const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+          if (!pinchStateRef.current && distance > 0) {
+            const centerX = (a.clientX + b.clientX) / 2;
+            const centerY = (a.clientY + b.clientY) / 2;
+            pinchStateRef.current = {
+              distance,
+              zoom: ui.view.zoom,
+              anchor: screenToWorld(centerX, centerY),
+            };
+          }
+          if (pinchStateRef.current && pinchStateRef.current.distance > 0) {
+            const scale = distance / pinchStateRef.current.distance;
+            const nextZoom = Math.max(0.2, Math.min(3, pinchStateRef.current.zoom * scale));
+            const centerX = (a.clientX + b.clientX) / 2;
+            const centerY = (a.clientY + b.clientY) / 2;
+            const rect = canvas.getBoundingClientRect();
+            const anchor = pinchStateRef.current.anchor;
+            const offsetX = centerX - (rect.left + rect.width / 2);
+            const offsetY = centerY - (rect.top + rect.height / 2);
+            ui.setView({
+              zoom: nextZoom,
+              x: anchor.x - offsetX / nextZoom,
+              y: anchor.y - offsetY / nextZoom,
+            });
+            return;
+          }
+        }
+      }
+
+      const primaryId = primaryPointerIdRef.current;
+      if (e.pointerType !== 'touch' && primaryId !== null && e.pointerId !== primaryId) return;
       if (panRef.current?.isPanning) {
         const dx = (panRef.current.startX - e.clientX) / ui.view.zoom;
         const dy = (panRef.current.startY - e.clientY) / ui.view.zoom;
@@ -801,7 +940,37 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      if (lastPointerId !== null && e.pointerId !== lastPointerId) return;
+      if (canvas.hasPointerCapture?.(e.pointerId)) {
+        try {
+          canvas.releasePointerCapture(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+
+      if (e.pointerType === 'touch') {
+        activeTouchesRef.current.delete(e.pointerId);
+        if (activeTouchesRef.current.size < 2) {
+          pinchStateRef.current = null;
+        }
+      }
+
+      const primaryId = primaryPointerIdRef.current;
+      if (primaryId !== null && primaryId !== e.pointerId && e.pointerType !== 'mouse') {
+        // Non-primary pointer lifted; reassess primary pointer
+        if (!activeTouchesRef.current.has(primaryId)) {
+          const next = activeTouchesRef.current.keys().next();
+          primaryPointerIdRef.current = next.done ? null : next.value;
+        }
+        return;
+      }
+
+      primaryPointerIdRef.current = null;
+      if (activeTouchesRef.current.size > 0) {
+        const next = activeTouchesRef.current.keys().next();
+        primaryPointerIdRef.current = next.done ? null : next.value;
+      }
+
       if (panRef.current?.isPanning) {
         panRef.current = null;
       }
@@ -809,7 +978,6 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         commitGroupResize();
         setHoverHandle(null);
         marqueeRef.current = null;
-        lastPointerId = null;
         return;
       }
       if (marqueeRef.current) {
@@ -828,7 +996,6 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           ui.clearNodeSelection();
         }
         setHoverHandle(null);
-        lastPointerId = null;
         return;
       }
       if (draggingRef.current && draggingRef.current.nodeId != null) {
@@ -853,11 +1020,23 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           const redo = () => {
             queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => nextMap.has(n.id) ? { ...n, x: nextMap.get(n.id)!.x, y: nextMap.get(n.id)!.y } : n));
             // persist to server in background
-            nextMap.forEach((pos, id) => { updateNode(boardId, id, pos).catch(()=>{}); });
+            const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            nextMap.forEach((pos, id) => {
+              const version = latest.find(node => node.id === id)?.updated_at;
+              updateNode(boardId, id, pos, { version }).catch(() => {
+                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              });
+            });
           };
           const undo = () => {
             queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => prevMap.has(n.id) ? { ...n, x: prevMap.get(n.id)!.x, y: prevMap.get(n.id)!.y } : n));
-            prevMap.forEach((pos, id) => { updateNode(boardId, id, pos).catch(()=>{}); });
+            const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+            prevMap.forEach((pos, id) => {
+              const version = latest.find(node => node.id === id)?.updated_at;
+              updateNode(boardId, id, pos, { version }).catch(() => {
+                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              });
+            });
           };
           commandStack.execute({ redo, undo });
           moveSnapshotRef.current = null;
@@ -917,10 +1096,11 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         edgeDragRef.current = null;
       }
       draggingRef.current = null;
-      lastPointerId = null;
       groupDragRef.current = null;
       linkingRef.current = null;
     };
+
+    const onPointerCancel = (e: PointerEvent) => onPointerUp(e);
 
     const onDoubleClick = (e: MouseEvent) => {
       const pe = e as unknown as PointerEvent;
@@ -951,7 +1131,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       };
       // optimistic create: insert a temporary node id (-timestamp)
       const tempId = -Date.now();
-      const optimistic = { ...payload, id: tempId } as Node;
+      const optimistic = { ...payload, id: tempId, updated_at: new Date().toISOString() } as Node;
       const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
       queryClient.setQueryData<Node[]>(['nodes', boardId], [...previous, optimistic]);
       (async () => {
@@ -981,6 +1161,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
     canvas.addEventListener('dblclick', onDoubleClick);
     const wheelListener: EventListener = onWheel as EventListener;
     canvas.addEventListener('wheel', onWheel, { passive: false });
@@ -1065,7 +1246,11 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           dup.style.cursor = 'pointer';
           dup.onclick = () => {
             const payload = { board_id: boardId, flow_id: n.flow_id, type: n.type, title: n.title + ' (copy)', x: n.x + 20, y: n.y + 20, width: n.width, height: n.height };
-            const temp = { ...payload, id: -Date.now() } as Node;
+            const temp = {
+              ...payload,
+              id: -Date.now(),
+              updated_at: new Date().toISOString(),
+            } as Node;
             const redo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], [...(queryClient.getQueryData<Node[]>(['nodes', boardId]) || []), temp]);
             const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).filter(x => x.id !== temp.id));
             commandStack.execute({ redo: () => { redo(); createNode(boardId, payload).catch(()=>{}); }, undo });
@@ -1122,15 +1307,54 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       canvas.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
       canvas.removeEventListener('dblclick', onDoubleClick);
       canvas.removeEventListener('wheel', wheelListener);
       canvas.removeEventListener('contextmenu', contextListener);
     };
-  }, [nodes, edges, ui.mode, ui.view.zoom, ui.view.x, ui.view.y, boardId, flows, onNodeDoubleClick, queryClient, ui]);
+  }, [
+    nodes,
+    edges,
+    ui.mode,
+    ui.view.zoom,
+    ui.view.x,
+    ui.view.y,
+    boardId,
+    flows,
+    onNodeDoubleClick,
+    queryClient,
+    ui,
+    hoverHandle,
+    hoverNodeId,
+    screenToWorld,
+  ]);
 
   return (
     <div style={{ flex: 1, position: 'relative', background: '#0f172a', height: '600px' }}>
       <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
+      {import.meta.env.DEV && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            background: 'rgba(15, 23, 42, 0.72)',
+            border: '1px solid rgba(148, 163, 184, 0.3)',
+            borderRadius: 8,
+            padding: '8px 12px',
+            fontSize: 12,
+            color: '#e2e8f0',
+            fontFamily: 'Menlo, Consolas, monospace',
+            pointerEvents: 'none',
+            lineHeight: 1.5,
+          }}
+        >
+          <div>fps: {metrics.fps}</div>
+          <div>nodes: {metrics.nodes}</div>
+          <div>edges: {metrics.edges}</div>
+          <div>selected: {metrics.selection}</div>
+        </div>
+      )}
     </div>
   );
 };

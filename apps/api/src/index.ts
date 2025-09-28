@@ -13,9 +13,15 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+type BroadcastMeta = {
+  clientId?: string | null;
+  timestamp?: string;
+};
+
 type BroadcastPayload = {
   type: string;
   data: unknown;
+  meta?: BroadcastMeta;
 };
 
 type BroadcastFn = (payload: BroadcastPayload) => void;
@@ -32,6 +38,13 @@ const ensureBoard = async (boardId: number) => {
     update: { updatedAt: new Date() },
     create: { id: boardId, name: `Board ${boardId}` },
   });
+};
+
+const getClientIdFromRequest = (req: express.Request) => {
+  const header = req.get('x-client-id');
+  if (!header) return null;
+  const trimmed = header.trim();
+  return trimmed.length > 0 ? trimmed : null;
 };
 
 const serializeTags = (tags: unknown): string => {
@@ -98,6 +111,7 @@ const toNodeResponse = (node: {
   height: number;
   title: string;
   content: string;
+  updatedAt: Date;
 }) => ({
   id: node.id,
   board_id: node.boardId,
@@ -112,6 +126,7 @@ const toNodeResponse = (node: {
   height: node.height,
   title: node.title,
   content: node.content,
+  updated_at: node.updatedAt.toISOString(),
 });
 
 const toEdgeResponse = (edge: {
@@ -193,12 +208,13 @@ app.post('/api/boards/:boardId/nodes', async (req, res) => {
   const boardId = parseInt(req.params.boardId, 10);
   if (Number.isNaN(boardId)) return res.status(400).json({ error: 'Invalid board id' });
 
+  const clientId = getClientIdFromRequest(req);
   await ensureBoard(boardId);
   const data = normaliseNodeInput(boardId, req.body || {});
   const created = await prisma.node.create({ data });
   const response = toNodeResponse(created);
   res.status(201).json({ data: response });
-  broadcast({ type: 'node:created', data: response });
+  broadcast({ type: 'node:created', data: response, meta: { clientId } });
 });
 
 if (process.env.NODE_ENV !== 'production') {
@@ -206,6 +222,7 @@ if (process.env.NODE_ENV !== 'production') {
     const boardId = parseInt(req.params.boardId, 10);
     if (Number.isNaN(boardId)) return res.status(400).json({ error: 'Invalid board id' });
 
+    const clientId = getClientIdFromRequest(req);
     await ensureBoard(boardId);
     let flows = await prisma.flow.findMany({ where: { boardId } });
     if (flows.length === 0) {
@@ -240,7 +257,7 @@ if (process.env.NODE_ENV !== 'production') {
       take: safeCount,
     });
     const mapped = latest.map(toNodeResponse);
-    mapped.forEach(node => broadcast({ type: 'node:created', data: node }));
+    mapped.forEach(node => broadcast({ type: 'node:created', data: node, meta: { clientId } }));
     res.status(201).json({ data: mapped });
   });
 }
@@ -249,20 +266,40 @@ app.patch(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (r
   const nodeId = parseInt(req.params.nodeId as string, 10);
   if (Number.isNaN(nodeId)) return res.status(400).json({ error: 'Invalid node id' });
 
+  const clientId = getClientIdFromRequest(req);
   const existing = await prisma.node.findUnique({ where: { id: nodeId } });
   if (!existing) return res.status(404).json({ error: 'Node not found' });
 
+  const versionHeader = req.get('x-node-version');
+  if (versionHeader && existing.updatedAt.toISOString() !== versionHeader) {
+    return res.status(409).json({ error: 'conflict', data: toNodeResponse(existing) });
+  }
+
   const partial = normaliseNodeInput(existing.boardId, { ...existing, ...req.body });
+  if (
+    partial.title === existing.title &&
+    partial.content === existing.content &&
+    partial.status === existing.status &&
+    partial.tags === existing.tags &&
+    partial.journaledAt?.toISOString?.() === existing.journaledAt?.toISOString?.() &&
+    partial.x === existing.x &&
+    partial.y === existing.y &&
+    partial.width === existing.width &&
+    partial.height === existing.height
+  ) {
+    return res.json({ data: toNodeResponse(existing) });
+  }
   const updated = await prisma.node.update({ where: { id: nodeId }, data: partial });
   const response = toNodeResponse(updated);
   res.json({ data: response });
-  broadcast({ type: 'node:updated', data: response });
+  broadcast({ type: 'node:updated', data: response, meta: { clientId } });
 });
 
 app.delete(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (req, res) => {
   const nodeId = parseInt(req.params.nodeId as string, 10);
   if (Number.isNaN(nodeId)) return res.status(400).json({ error: 'Invalid node id' });
 
+  const clientId = getClientIdFromRequest(req);
   const existing = await prisma.node.findUnique({ where: { id: nodeId } });
   if (!existing) return res.status(404).json({ error: 'Node not found' });
 
@@ -270,13 +307,14 @@ app.delete(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (
   const removed = await prisma.node.delete({ where: { id: nodeId } });
   const response = toNodeResponse(removed);
   res.json({ data: response });
-  broadcast({ type: 'node:deleted', data: response });
+  broadcast({ type: 'node:deleted', data: response, meta: { clientId } });
 });
 
 app.post('/api/boards/:boardId/edges', async (req, res) => {
   const boardId = parseInt(req.params.boardId, 10);
   if (Number.isNaN(boardId)) return res.status(400).json({ error: 'Invalid board id' });
 
+  const clientId = getClientIdFromRequest(req);
   await ensureBoard(boardId);
   const { source_node_id: sourceNodeId, target_node_id: targetNodeId } = req.body || {};
   if (!sourceNodeId || !targetNodeId) return res.status(400).json({ error: 'Missing source or target node id' });
@@ -290,26 +328,28 @@ app.post('/api/boards/:boardId/edges', async (req, res) => {
   });
   const response = toEdgeResponse(created);
   res.status(201).json({ data: response });
-  broadcast({ type: 'edge:created', data: response });
+  broadcast({ type: 'edge:created', data: response, meta: { clientId } });
 });
 
 app.delete(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], async (req, res) => {
   const edgeId = parseInt((req.params.edgeId as string) || '0', 10);
   if (Number.isNaN(edgeId)) return res.status(400).json({ error: 'Invalid edge id' });
 
+  const clientId = getClientIdFromRequest(req);
   const existing = await prisma.edge.findUnique({ where: { id: edgeId } });
   if (!existing) return res.status(404).json({ error: 'Edge not found' });
 
   const removed = await prisma.edge.delete({ where: { id: edgeId } });
   const response = toEdgeResponse(removed);
   res.json({ data: response });
-  broadcast({ type: 'edge:deleted', data: response });
+  broadcast({ type: 'edge:deleted', data: response, meta: { clientId } });
 });
 
 app.patch(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], async (req, res) => {
   const edgeId = parseInt((req.params.edgeId as string) || '0', 10);
   if (Number.isNaN(edgeId)) return res.status(400).json({ error: 'Invalid edge id' });
 
+  const clientId = getClientIdFromRequest(req);
   const existing = await prisma.edge.findUnique({ where: { id: edgeId } });
   if (!existing) return res.status(404).json({ error: 'Edge not found' });
 
@@ -320,16 +360,30 @@ app.patch(['/api/edges/:edgeId', '/api/boards/:boardId/edges/:edgeId'], async (r
   });
   const response = toEdgeResponse(updated);
   res.json({ data: response });
-  broadcast({ type: 'edge:updated', data: response });
+  broadcast({ type: 'edge:updated', data: response, meta: { clientId } });
 });
 
 const server = http.createServer(app);
 
 const wss = new WebSocketServer({ server });
+const clientRegistry = new WeakMap<WebSocket, { clientId?: string }>();
+
 wss.on('connection', (socket: WebSocket) => {
   console.log('ws client connected');
+  const meta = { clientId: undefined as string | undefined };
+  clientRegistry.set(socket, meta);
 
   socket.on('message', (message: RawData) => {
+    try {
+      const parsed = JSON.parse(message.toString());
+      if (parsed?.type === 'client:hello' && typeof parsed.clientId === 'string') {
+        meta.clientId = parsed.clientId;
+        return;
+      }
+    } catch (error) {
+      // Non-JSON payloads are forwarded as-is
+    }
+
     wss.clients.forEach(client => {
       if (client !== socket && client.readyState === WebSocket.OPEN) {
         client.send(message);
@@ -337,11 +391,20 @@ wss.on('connection', (socket: WebSocket) => {
     });
   });
 
-  socket.send(JSON.stringify({ type: 'connection:ack' }));
+  socket.send(
+    JSON.stringify({ type: 'connection:ack', meta: { timestamp: new Date().toISOString() } }),
+  );
 });
 
 broadcast = (payload: BroadcastPayload) => {
-  const serialized = JSON.stringify(payload);
+  const meta: BroadcastMeta = {
+    timestamp: new Date().toISOString(),
+    ...payload.meta,
+  };
+  if (!meta.clientId) {
+    delete meta.clientId;
+  }
+  const serialized = JSON.stringify({ ...payload, meta });
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(serialized);
