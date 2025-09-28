@@ -23,16 +23,40 @@
   border-bottom: 1px solid #3a3a3a;
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .canvas-container {
   flex-grow: 1;
   position: relative;
   overflow: hidden;
+  min-height: 0;
 }
 
 .canvas-container canvas {
   position: absolute;
   top: 0;
   left: 0;
+}
+
+@media (max-width: 900px) {
+  .app {
+    height: 100dvh;
+  }
+
+  .header,
+  .toolbar {
+    padding: 8px 16px;
+  }
+
+  .header h1 {
+    font-size: 1.25em;
+  }
+}
+
+@media (max-width: 600px) {
+  .toolbar {
+    gap: 6px;
+  }
 }

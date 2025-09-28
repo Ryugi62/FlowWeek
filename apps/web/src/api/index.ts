@@ -21,6 +21,10 @@ const devLogOnce = (key: string, log: () => void) => {
 const isWsMessage = (payload: unknown): payload is WsMessage =>
   typeof payload === 'object' && payload !== null && 'type' in payload;
 
+export type WsConnection = {
+  close: () => void;
+};
+
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
   headers: {
@@ -73,40 +77,101 @@ export const updateEdge = async (
 };
 
 // Simple WebSocket listener for development collaboration
-export function connectWs(onMessage: WsListener) {
+export function connectWs(onMessage: WsListener): WsConnection | null {
   const url = import.meta.env.VITE_WS_URL?.trim() || DEFAULT_WS_URL;
 
   try {
-    const ws = new WebSocket(url);
-    ws.addEventListener('open', () => {
-      devLogOnce('ws-open', () => console.info(`[flowweek] websocket connected (${url})`));
-    });
-    ws.addEventListener('message', event => {
-      if (typeof event.data !== 'string') return;
-      try {
-        const parsed = JSON.parse(event.data);
-        if (isWsMessage(parsed)) {
-          onMessage(parsed);
-        }
-      } catch (error) {
-        devLogOnce('ws-parse-error', () => console.warn('[flowweek] websocket message parsing failed', error));
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let closed = false;
+    let attempt = 0;
+
+    const cleanupTimer = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
-    });
+    };
 
-    ws.addEventListener('error', () => {
-      devLogOnce('ws-error', () => console.warn(`[flowweek] websocket connection failed for ${url}`));
-    });
+    const scheduleReconnect = () => {
+      if (closed) return;
+      const delay = Math.min(5000, 500 * 2 ** attempt);
+      cleanupTimer();
+      reconnectTimer = window.setTimeout(() => {
+        attempt += 1;
+        connect();
+      }, delay);
+    };
 
-    ws.addEventListener('close', event => {
-      if (event.wasClean) return;
-      devLogOnce('ws-close', () => console.warn(`[flowweek] websocket closed unexpectedly (code ${event.code})`));
-    });
+    const connect = () => {
+      if (closed || navigator.onLine === false) {
+        scheduleReconnect();
+        return;
+      }
+      socket = new WebSocket(url);
+      socket.addEventListener('open', () => {
+        devLogOnce('ws-open', () => console.info(`[flowweek] websocket connected (${url})`));
+        attempt = 0;
+        cleanupTimer();
+      });
+      socket.addEventListener('message', event => {
+        if (typeof event.data !== 'string') return;
+        try {
+          const parsed = JSON.parse(event.data);
+          if (isWsMessage(parsed)) {
+            onMessage(parsed);
+          }
+        } catch (error) {
+          devLogOnce('ws-parse-error', () => console.warn('[flowweek] websocket message parsing failed', error));
+        }
+      });
 
-    return ws;
+      socket.addEventListener('error', () => {
+        devLogOnce('ws-error', () => console.warn(`[flowweek] websocket connection failed for ${url}`));
+      });
+
+      socket.addEventListener('close', event => {
+        if (closed) return;
+        if (!event.wasClean) {
+          devLogOnce('ws-close', () => console.warn(`[flowweek] websocket closed unexpectedly (code ${event.code})`));
+        }
+        scheduleReconnect();
+      });
+    };
+
+    connect();
+
+    const handleOnline = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        attempt = 0;
+        connect();
+      }
+    };
+
+    const handleOffline = () => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close(1001, 'offline');
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return {
+      close: () => {
+        closed = true;
+        cleanupTimer();
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close(1000, 'client shutdown');
+        }
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      },
+    };
   } catch (error) {
     devLogOnce('ws-init-error', () => console.warn('[flowweek] unable to initialise websocket', error));
     return null;
   }
 }
 
-export type { WsMessage };
+export type { WsMessage, NodeWritePayload, EdgeWritePayload };

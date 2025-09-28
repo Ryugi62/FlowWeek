@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum NodeType {
+  task
+  note
+  journal
+}
+
+enum TaskStatus {
+  todo
+  in_progress
+  done
+}
+
+model Board {
+  id    Int     @id @default(autoincrement())
+  name  String
+  flows Flow[]
+  nodes Node[]
+  edges Edge[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Flow {
+  id       Int    @id @default(autoincrement())
+  name     String
+  color    String
+  yLane    Int     @map("y_lane")
+  boardId  Int
+  board    Board   @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  nodes    Node[]
+}
+
+model Node {
+  id          Int         @id @default(autoincrement())
+  boardId     Int
+  board       Board       @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  flowId      Int? 
+  flow        Flow?       @relation(fields: [flowId], references: [id], onDelete: SetNull)
+  type        NodeType
+  status      TaskStatus?
+  tags        String      @default("[]")
+  journaledAt DateTime?   @map("journaled_at")
+  x           Int
+  y           Int
+  width       Int
+  height      Int
+  title       String
+  content     String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  outgoingEdges Edge[]    @relation("source")
+  incomingEdges Edge[]    @relation("target")
+
+  @@index([boardId])
+  @@index([flowId])
+}
+
+model Edge {
+  id           Int   @id @default(autoincrement())
+  boardId      Int
+  board        Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  sourceNodeId Int   @map("source_node_id")
+  targetNodeId Int   @map("target_node_id")
+  source       Node  @relation("source", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  target       Node  @relation("target", fields: [targetNodeId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+
+  @@index([boardId])
+}

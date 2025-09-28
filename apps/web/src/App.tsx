@@ -175,7 +175,7 @@ function App() {
 
   // connect to ws for live updates (development)
   useEffect(() => {
-    const ws = connectWs((msg: WsMessage) => {
+    const connection = connectWs((msg: WsMessage) => {
       if (!msg?.type || msg.type === 'connection:ack') return;
       // granular updates for nodes
       if (msg.type === 'node:created') {
@@ -202,7 +202,7 @@ function App() {
       }
     });
     return () => {
-      if (ws) ws.close();
+      connection?.close();
     };
   }, [boardId]);
 

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { Flow, Node, Edge, TaskStatus } from '../types';
 import { useUiStore } from '../stores';
 import { useQueryClient } from '@tanstack/react-query';
-import { updateNode, createNode, createEdge, deleteNode, deleteEdge } from '../api';
+import { updateNode, createNode, createEdge, deleteNode, deleteEdge, type EdgeWritePayload } from '../api';
 import { commandStack } from '../stores/commands';
 import { filterNodes } from '../utils/filterNodes';
 
@@ -896,19 +896,17 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         if (targetNode) {
           const prev = edges.find(x => x.id === ed.edgeId) as Edge | undefined;
           if (prev) {
-            const payload = ed.which === 'source' ? { source_node_id: targetNode.id } : { target_node_id: targetNode.id };
+            const payload: EdgeWritePayload = ed.which === 'source' ? { source_node_id: targetNode.id } : { target_node_id: targetNode.id };
             const redo = () => {
               queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).map(x => x.id === ed.edgeId ? { ...x, ...payload } : x));
-              // persist
-              // updateEdge is imported at top
-              // @ts-ignore
               updateEdge(boardId, ed.edgeId, payload).catch(()=>{});
             };
             const undo = () => {
               queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).map(x => x.id === ed.edgeId ? prev : x));
-              // revert server - best-effort
-              // @ts-ignore
-              updateEdge(boardId, ed.edgeId, ed.which === 'source' ? { source_node_id: ed.originalNodeId } : { target_node_id: ed.originalNodeId }).catch(()=>{});
+              const revertPayload: EdgeWritePayload = ed.which === 'source'
+                ? { source_node_id: ed.originalNodeId }
+                : { target_node_id: ed.originalNodeId };
+              updateEdge(boardId, ed.edgeId, revertPayload).catch(()=>{});
             };
             commandStack.execute({ redo, undo });
           }
@@ -954,10 +952,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
       queryClient.setQueryData<Node[]>(['nodes', boardId], [...previous, optimistic]);
       (async () => {
-          try {
-            await createNode(boardId, payload);
-            queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
-        } catch (err) {
+        try {
+          await createNode(boardId, payload);
+          queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+        } catch {
           queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
         }
       })();
@@ -981,6 +979,8 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('dblclick', onDoubleClick);
+    const wheelListener: EventListener = onWheel as EventListener;
+    const contextListener: EventListener = onContext as EventListener;
     canvas.addEventListener('wheel', onWheel, { passive: false });
     // contextmenu for right-click actions
     const isPointNearBezier = (x1:number,y1:number,cp1x:number,cp1y:number,cp2x:number,cp2y:number,x2:number,y2:number, px:number, py:number) => {
@@ -1120,8 +1120,8 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('dblclick', onDoubleClick);
-      canvas.removeEventListener('wheel', onWheel as any);
-      canvas.removeEventListener('contextmenu', onContext as any);
+      canvas.removeEventListener('wheel', wheelListener);
+      canvas.removeEventListener('contextmenu', contextListener);
     };
   }, [nodes, edges, ui.mode, ui.view.zoom, ui.view.x, ui.view.y, boardId, flows, onNodeDoubleClick, queryClient, ui]);
 

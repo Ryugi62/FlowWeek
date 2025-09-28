@@ -59,6 +59,7 @@ Create the following files:
 **apps/api/.env**:
 ```
 PORT=3001
+DATABASE_URL="file:./dev.db"
 NODE_ENV=development
 ```
 
@@ -79,6 +80,9 @@ VITE_WS_URL=ws://localhost:3001 # optional: enable realtime previews
 
 ### API Scripts
 - `npm run dev:api` - Start API server with hot reload
+- `npm run db:dev` - Run Prisma migrations against the local SQLite database
+- `npm run db:migrate` - Apply pending migrations (useful in CI/deploys)
+- `npm run db:seed` - Seed the database with sample board/flow data
 - `npm run build:api` - Build API for production
 - `npm run test:api` - Run API tests
 
@@ -115,6 +119,8 @@ GitHub Actions automatically runs:
 - `GET /api/boards/:boardId/flows` - Get flows for a board
 - `GET /api/boards/:boardId/nodes` - Get nodes for a board
 - `GET /api/boards/:boardId/edges` - Get edges for a board
+- `POST /api/boards/:boardId/nodes/bulk` - (development only) generate up to 500 nodes for performance testing
+- Standard CRUD endpoints exist for nodes and edges via `POST/PATCH/DELETE`
 
 ## Contributing
 
