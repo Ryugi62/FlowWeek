@@ -449,7 +449,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
 
   // Helpers to convert between screen and world coords
   const screenToWorld = (sx: number, sy: number) => {
-    const canvas = canvasRef.current!;
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return { x: sx, y: sy };
+    }
     const rect = canvas.getBoundingClientRect();
     const DPR = window.devicePixelRatio || 1;
     const x = (sx - rect.left - canvas.width / (2 * DPR)) / ui.view.zoom + ui.view.x;
@@ -980,7 +983,6 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     window.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('dblclick', onDoubleClick);
     const wheelListener: EventListener = onWheel as EventListener;
-    const contextListener: EventListener = onContext as EventListener;
     canvas.addEventListener('wheel', onWheel, { passive: false });
     // contextmenu for right-click actions
     const isPointNearBezier = (x1:number,y1:number,cp1x:number,cp1y:number,cp2x:number,cp2y:number,x2:number,y2:number, px:number, py:number) => {
@@ -1112,6 +1114,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       }
       return null;
     };
+    const contextListener: EventListener = onContext as EventListener;
     canvas.addEventListener('contextmenu', onContext);
 
 
