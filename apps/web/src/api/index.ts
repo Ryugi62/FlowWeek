@@ -46,7 +46,12 @@ const resolveClientId = () => {
   return generated;
 };
 
-const withClientHeaders = (headers: Record<string, string> = {}) => ({
+type ClientHeaders = Record<string, string> & {
+  'x-client-id': string;
+  'x-node-version'?: string;
+};
+
+const withClientHeaders = (headers: Record<string, string> = {}): ClientHeaders => ({
   ...headers,
   'x-client-id': resolveClientId(),
 });

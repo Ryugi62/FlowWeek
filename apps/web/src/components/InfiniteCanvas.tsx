@@ -8,6 +8,7 @@ import {
   createEdge,
   deleteNode,
   deleteEdge,
+  updateEdge,
   type EdgeWritePayload,
   type NodeWritePayload,
   ConflictError,

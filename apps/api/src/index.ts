@@ -16,6 +16,7 @@ const PORT = process.env.PORT || 3001;
 type BroadcastMeta = {
   clientId?: string | null;
   timestamp?: string;
+  conflicted?: boolean;
 };
 
 type BroadcastPayload = {

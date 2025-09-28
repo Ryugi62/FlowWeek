@@ -19,8 +19,87 @@ import { commandStack } from './stores/commands';
 import type { Flow, Node, Edge } from './types';
 import { getOrCreateClientId } from './utils/clientId';
 
-// API fetch functions
-// ... (fetch functions remain the same)
+const isTaskStatus = (value: unknown): value is Node['status'] =>
+  value === 'todo' || value === 'in-progress' || value === 'done';
+
+const isNode = (value: unknown): value is Node => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<Node>;
+  const nodeType = candidate.type;
+  const typeValid = nodeType === 'task' || nodeType === 'note' || nodeType === 'journal';
+  return (
+    typeValid &&
+    typeof candidate.id === 'number' &&
+    typeof candidate.board_id === 'number' &&
+    typeof candidate.x === 'number' &&
+    typeof candidate.y === 'number' &&
+    typeof candidate.width === 'number' &&
+    typeof candidate.height === 'number' &&
+    typeof candidate.title === 'string' &&
+    typeof candidate.updated_at === 'string'
+  );
+};
+
+const isEdge = (value: unknown): value is Edge => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<Edge>;
+  return (
+    typeof candidate.id === 'number' &&
+    typeof candidate.board_id === 'number' &&
+    typeof candidate.source_node_id === 'number' &&
+    typeof candidate.target_node_id === 'number'
+  );
+};
+
+type RawNode = Partial<Node> & {
+  tags?: unknown;
+  content?: unknown;
+  status?: unknown;
+  updated_at?: unknown;
+  journaled_at?: unknown;
+};
+
+const normaliseNodeResponse = (node: RawNode, boardId: number): Node | null => {
+  if (typeof node.id !== 'number') return null;
+  const type = node.type;
+  const validType = type === 'task' || type === 'note' || type === 'journal' ? type : 'note';
+  if (
+    typeof node.x !== 'number' ||
+    typeof node.y !== 'number' ||
+    typeof node.width !== 'number' ||
+    typeof node.height !== 'number'
+  ) {
+    return null;
+  }
+
+  const status = isTaskStatus(node.status)
+    ? node.status
+    : validType === 'task'
+    ? 'todo'
+    : null;
+
+  const tags = Array.isArray(node.tags)
+    ? node.tags.filter((tag): tag is string => typeof tag === 'string')
+    : [];
+
+  return {
+    id: node.id,
+    board_id: typeof node.board_id === 'number' ? node.board_id : boardId,
+    flow_id: typeof node.flow_id === 'number' ? node.flow_id : null,
+    type: validType,
+    status,
+    tags,
+    journaled_at: typeof node.journaled_at === 'string' ? node.journaled_at : null,
+    x: node.x,
+    y: node.y,
+    width: node.width,
+    height: node.height,
+    title: typeof node.title === 'string' ? node.title : '',
+    content: typeof node.content === 'string' ? node.content : undefined,
+    updated_at:
+      typeof node.updated_at === 'string' ? node.updated_at : new Date().toISOString(),
+  };
+};
 
 function App() {
   const boardId = 1; // Placeholder
@@ -345,28 +424,62 @@ function App() {
     const connection = connectWs(clientId, (msg: WsMessage) => {
       if (!msg?.type || msg.type === 'connection:ack') return;
       if (msg.meta?.clientId && msg.meta.clientId === clientId) return;
-      // granular updates for nodes
-      if (msg.type === 'node:created') {
-        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => [...(old || []), msg.data]);
-        return;
-      }
-      if (msg.type === 'node:updated') {
-        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).map(n => n.id === msg.data.id ? msg.data : n));
-        return;
-      }
-      if (msg.type === 'node:deleted') {
-        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => (old || []).filter(n => n.id !== msg.data.id));
+
+      if (msg.type === 'node:created' && isNode(msg.data)) {
+        const node = msg.data;
+        queryClient.setQueryData<Node[]>(['nodes', boardId], old => {
+          const previous = old ?? [];
+          const withoutDuplicate = previous.filter(current => current.id !== node.id);
+          return [...withoutDuplicate, node];
+        });
         return;
       }
 
-      // granular updates for edges
-      if (msg.type === 'edge:created') {
-        queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => [...(old || []), msg.data]);
+      if (msg.type === 'node:updated' && isNode(msg.data)) {
+        const node = msg.data;
+        queryClient.setQueryData<Node[]>(['nodes', boardId], old => {
+          const previous = old ?? [];
+          const hasNode = previous.some(current => current.id === node.id);
+          return hasNode ? previous.map(current => (current.id === node.id ? node : current)) : [...previous, node];
+        });
         return;
       }
-      if (msg.type === 'edge:deleted') {
-        queryClient.setQueryData<Edge[]>(['edges', boardId], (old = []) => (old || []).filter(e => e.id !== msg.data.id));
+
+      if (msg.type === 'node:deleted' && isNode(msg.data)) {
+        const node = msg.data;
+        queryClient.setQueryData<Node[]>(['nodes', boardId], old => {
+          const previous = old ?? [];
+          return previous.filter(current => current.id !== node.id);
+        });
         return;
+      }
+
+      if (msg.type === 'edge:created' && isEdge(msg.data)) {
+        const edge = msg.data;
+        queryClient.setQueryData<Edge[]>(['edges', boardId], old => {
+          const previous = old ?? [];
+          const withoutDuplicate = previous.filter(current => current.id !== edge.id);
+          return [...withoutDuplicate, edge];
+        });
+        return;
+      }
+
+      if (msg.type === 'edge:updated' && isEdge(msg.data)) {
+        const edge = msg.data;
+        queryClient.setQueryData<Edge[]>(['edges', boardId], old => {
+          const previous = old ?? [];
+          const hasEdge = previous.some(current => current.id === edge.id);
+          return hasEdge ? previous.map(current => (current.id === edge.id ? edge : current)) : [...previous, edge];
+        });
+        return;
+      }
+
+      if (msg.type === 'edge:deleted' && isEdge(msg.data)) {
+        const edge = msg.data;
+        queryClient.setQueryData<Edge[]>(['edges', boardId], old => {
+          const previous = old ?? [];
+          return previous.filter(current => current.id !== edge.id);
+        });
       }
     });
     return () => {
@@ -412,29 +525,10 @@ const fetchFlows = async (boardId: number) => {
 };
 const fetchNodes = async (boardId: number) => {
   const res = await apiClient.get(`/boards/${boardId}/nodes`);
-  type NodeResponse = Partial<Node> & {
-    tags?: unknown;
-    content?: unknown;
-    status?: unknown;
-    updated_at?: unknown;
-  };
-  const rows: NodeResponse[] = res.data.data || [];
-  return rows.map<Node>(node => ({
-    ...node,
-    content: typeof node.content === 'string' ? node.content : '',
-    tags: Array.isArray(node.tags) ? node.tags : [],
-    journaled_at: typeof node.journaled_at === 'string' ? node.journaled_at : null,
-    status:
-      typeof node.status === 'string'
-        ? (node.status as Node['status'])
-        : node.type === 'task'
-        ? 'todo'
-        : null,
-    updated_at:
-      typeof node.updated_at === 'string'
-        ? node.updated_at
-        : new Date().toISOString(),
-  }));
+  const rows: RawNode[] = Array.isArray(res.data?.data) ? res.data.data : [];
+  return rows
+    .map(node => normaliseNodeResponse(node, boardId))
+    .filter((node): node is Node => node !== null);
 };
 const fetchEdges = async (boardId: number) => {
   const res = await apiClient.get(`/boards/${boardId}/edges`);

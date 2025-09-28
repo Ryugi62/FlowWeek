@@ -4,23 +4,26 @@ import { filterNodes } from './filterNodes';
 
 type PartialNode = Partial<Node> & { id: number };
 
-const baseNode = (overrides: PartialNode): Node => ({
-  id: overrides.id,
-  board_id: 1,
-  flow_id: 1,
-  type: 'note',
-  status: null,
-  tags: [],
-  journaled_at: null,
-  x: 0,
-  y: 0,
-  width: 160,
-  height: 120,
-  title: 'Untitled',
-  content: '',
-  updated_at: new Date().toISOString(),
-  ...overrides,
-});
+const baseNode = (overrides: PartialNode): Node => {
+  const { id, ...rest } = overrides;
+  return {
+    id,
+    board_id: 1,
+    flow_id: 1,
+    type: 'note',
+    status: null,
+    tags: [],
+    journaled_at: null,
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    title: 'Untitled',
+    content: '',
+    updated_at: new Date().toISOString(),
+    ...rest,
+  };
+};
 
 describe('filterNodes', () => {
   const nodes: Node[] = [
