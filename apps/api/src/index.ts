@@ -27,8 +27,51 @@ const mockFlows = [
 ];
 
 const mockNodes = [
-  { id: 1, board_id: 1, flow_id: 1, type: 'task', x: 100, y: 50, width: 200, height: 100, title: 'Task 1', content: 'Do something' },
-  { id: 2, board_id: 1, flow_id: 2, type: 'note', x: 300, y: 150, width: 150, height: 80, title: 'Note 1', content: 'Remember this' },
+  {
+    id: 1,
+    board_id: 1,
+    flow_id: 1,
+    type: 'task',
+    status: 'todo',
+    tags: ['setup'],
+    journaled_at: null,
+    x: 100,
+    y: 50,
+    width: 220,
+    height: 120,
+    title: 'Wireframe onboarding',
+    content: 'Sketch welcome flow variations and pick v1 focus.',
+  },
+  {
+    id: 2,
+    board_id: 1,
+    flow_id: 2,
+    type: 'note',
+    status: null,
+    tags: ['ideas'],
+    journaled_at: null,
+    x: 360,
+    y: 140,
+    width: 200,
+    height: 120,
+    title: 'Research notes',
+    content: 'Collect async collaboration references: Linear, Figma, Excalidraw.',
+  },
+  {
+    id: 3,
+    board_id: 1,
+    flow_id: 1,
+    type: 'journal',
+    status: null,
+    tags: ['retro'],
+    journaled_at: new Date().toISOString(),
+    x: 640,
+    y: 260,
+    width: 220,
+    height: 140,
+    title: 'Sprint retrospective',
+    content: 'Captured wins, blockers, follow-up tasks. Sync with Ryugi.',
+  },
 ];
 
 const mockEdges = [
@@ -59,7 +102,24 @@ app.post('/api/boards/:boardId/nodes', (req, res) => {
   const boardId = parseInt(req.params.boardId);
   const payload = req.body || {};
   const nextId = mockNodes.reduce((m, n) => Math.max(m, n.id), 0) + 1;
-  const newNode = { id: nextId, board_id: boardId, flow_id: payload.flow_id || null, type: payload.type || 'note', x: payload.x || 0, y: payload.y || 0, width: payload.width || 160, height: payload.height || 64, title: payload.title || '', content: payload.content || '' };
+  const type = payload.type || 'note';
+  const defaultStatus = type === 'task' ? 'todo' : null;
+  const newNode = {
+    id: nextId,
+    board_id: boardId,
+    flow_id: payload.flow_id || null,
+    type,
+    status: payload.status ?? defaultStatus,
+    tags: Array.isArray(payload.tags) ? payload.tags : [],
+    journaled_at:
+      payload.journaled_at ?? (type === 'journal' ? new Date().toISOString() : null),
+    x: payload.x || 0,
+    y: payload.y || 0,
+    width: payload.width || (type === 'task' ? 220 : 160),
+    height: payload.height || (type === 'journal' ? 140 : 120),
+    title: payload.title || '',
+    content: payload.content || '',
+  };
   mockNodes.push(newNode as any);
   res.status(201).json({ data: newNode });
   try { (global as any).broadcast && (global as any).broadcast({ type: 'node:created', data: newNode }); } catch (e) {}
