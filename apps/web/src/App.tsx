@@ -3,10 +3,17 @@ import InfiniteCanvas from './components/InfiniteCanvas';
 import DetailPanel from './components/DetailPanel';
 import Toolbar from './components/Toolbar';
 import { useQuery } from '@tanstack/react-query';
-import apiClient, { connectWs, updateNode as updateNodeApi, setApiClientId } from './api';
+import apiClient, {
+  connectWs,
+  updateNode as updateNodeApi,
+  setApiClientId,
+  createNode,
+  deleteNode,
+  type NodeWritePayload,
+} from './api';
 import type { WsMessage } from './api';
 import { queryClient } from './stores';
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useUiStore } from './stores';
 import { commandStack } from './stores/commands';
 import type { Flow, Node, Edge } from './types';
@@ -130,54 +137,208 @@ function App() {
     [applyNodeTransform],
   );
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'z') {
-          e.preventDefault();
-          if (e.shiftKey) {
-            const s = useUiStore.getState();
-            if (s.redo) s.redo();
-          } else {
-            const s = useUiStore.getState();
-            if (s.undo) s.undo();
+  const duplicateSelectedNodes = useCallback(async (currentNodes: Node[]) => {
+    const state = useUiStore.getState();
+    const selectedIds = Array.from(state.selectedNodeIds);
+    if (!selectedIds.length) return;
+
+    const originals = currentNodes.filter(n => selectedIds.includes(n.id));
+    if (!originals.length) return;
+
+    const boardKey = ['nodes', boardId] as const;
+    const offset = 28;
+    const now = Date.now();
+    const optimisticCopies = originals.map((node, index) => ({
+      ...node,
+      id: -(now + index),
+      x: node.x + offset,
+      y: node.y + offset,
+      title: node.title ? `${node.title} (copy)` : 'Copy',
+      updated_at: new Date().toISOString(),
+    }));
+
+    const payloads: NodeWritePayload[] = originals.map(node => ({
+      flow_id: node.flow_id,
+      type: node.type,
+      status: node.status ?? (node.type === 'task' ? 'todo' : null),
+      tags: node.tags,
+      journaled_at: node.journaled_at,
+      x: node.x + offset,
+      y: node.y + offset,
+      width: node.width,
+      height: node.height,
+      title: node.title,
+      content: node.content,
+    }));
+
+    let persistedCopies: Node[] = [];
+    let cancelled = false;
+
+    commandStack.execute({
+      redo: () => {
+        cancelled = false;
+        queryClient.setQueryData<Node[]>(boardKey, (old = []) => [...old, ...optimisticCopies]);
+        useUiStore.getState().selectNodes(optimisticCopies.map(n => n.id), false);
+
+        (async () => {
+          try {
+            const results = await Promise.all(payloads.map(payload => createNode(boardId, payload)));
+            if (cancelled) {
+              results.forEach(res => {
+                const created = res.data?.data as Node | undefined;
+                if (created) deleteNode(boardId, created.id).catch(() => {});
+              });
+              return;
+            }
+
+            persistedCopies = results
+              .map(res => res.data?.data as Node | undefined)
+              .filter((node): node is Node => Boolean(node));
+
+            if (persistedCopies.length) {
+              const persistedIds = new Set(persistedCopies.map(n => n.id));
+              queryClient.setQueryData<Node[]>(boardKey, (old = []) => {
+                const filtered = (old || []).filter(n => !optimisticCopies.find(o => o.id === n.id));
+                const existing = filtered.filter(n => !persistedIds.has(n.id));
+                return [...existing, ...persistedCopies];
+              });
+              useUiStore.getState().selectNodes(persistedCopies.map(n => n.id), false);
+            } else {
+              queryClient.invalidateQueries({ queryKey: boardKey });
+            }
+          } catch {
+            queryClient.invalidateQueries({ queryKey: boardKey });
           }
+        })();
+      },
+      undo: () => {
+        cancelled = true;
+        const idsToRemove = new Set(
+          (persistedCopies.length ? persistedCopies : optimisticCopies).map(n => n.id),
+        );
+        queryClient.setQueryData<Node[]>(boardKey, (old = []) =>
+          (old || []).filter(n => !idsToRemove.has(n.id)),
+        );
+        if (persistedCopies.length) {
+          persistedCopies.forEach(copy => deleteNode(boardId, copy.id).catch(() => {}));
         }
-        if (e.key === 'y') {
-          e.preventDefault();
-          const s = useUiStore.getState();
-          if (s.redo) s.redo();
-        }
-      }
-      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        if (e.key === 'ArrowLeft') {
-          e.preventDefault();
-          alignNodes('left');
-        } else if (e.key === 'ArrowRight') {
-          e.preventDefault();
-          alignNodes('right');
-        } else if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          alignNodes('top');
-        } else if (e.key === 'ArrowDown') {
-          e.preventDefault();
-          alignNodes('bottom');
-        } else if (e.key.toLowerCase() === 'h') {
-          e.preventDefault();
-          distributeNodes('horizontal');
-        } else if (e.key.toLowerCase() === 'v') {
-          e.preventDefault();
-          distributeNodes('vertical');
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [alignNodes, distributeNodes]);
+        persistedCopies = [];
+        useUiStore.getState().clearNodeSelection();
+      },
+    });
+  }, [boardId]);
+
+  const zoomBy = useCallback((delta: number) => {
+    const store = useUiStore.getState();
+    const nextZoom = Math.min(3, Math.max(0.2, store.view.zoom + delta));
+    store.setView({ zoom: Number(nextZoom.toFixed(2)) });
+  }, []);
+
+  const resetView = useCallback(() => {
+    const store = useUiStore.getState();
+    store.setView({ zoom: 1, x: 0, y: 0 });
+  }, []);
 
   const { data: flows = [] } = useQuery<Flow[]>({ queryKey: ['flows', boardId], queryFn: () => fetchFlows(boardId) });
   const { data: nodes = [] } = useQuery<Node[]>({ queryKey: ['nodes', boardId], queryFn: () => fetchNodes(boardId) });
   const { data: edges = [] } = useQuery<Edge[]>({ queryKey: ['edges', boardId], queryFn: () => fetchEdges(boardId) });
+
+  const currentNodesRef = useRef<Node[]>(nodes);
+  useEffect(() => {
+    currentNodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isMeta = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+
+      if (isMeta) {
+        if (key === 'z') {
+          event.preventDefault();
+          const store = useUiStore.getState();
+          if (event.shiftKey) {
+            store.redo?.();
+          } else {
+            store.undo?.();
+          }
+          return;
+        }
+        if (key === 'y') {
+          event.preventDefault();
+          useUiStore.getState().redo?.();
+          return;
+        }
+        if (key === 'a') {
+          event.preventDefault();
+          useUiStore.getState().selectNodes(currentNodesRef.current.map(n => n.id), false);
+          return;
+        }
+        if (key === 'd') {
+          event.preventDefault();
+          duplicateSelectedNodes(currentNodesRef.current);
+          return;
+        }
+        if (key === '=' || key === '+') {
+          event.preventDefault();
+          zoomBy(0.1);
+          return;
+        }
+        if (key === '-') {
+          event.preventDefault();
+          zoomBy(-0.1);
+          return;
+        }
+        if (key === '0') {
+          event.preventDefault();
+          resetView();
+          return;
+        }
+      }
+
+      if (event.altKey && event.shiftKey && !isMeta) {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          alignNodes('left');
+          return;
+        }
+        if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          alignNodes('right');
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          alignNodes('top');
+          return;
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          alignNodes('bottom');
+          return;
+        }
+        if (key === 'h') {
+          event.preventDefault();
+          distributeNodes('horizontal');
+          return;
+        }
+        if (key === 'v') {
+          event.preventDefault();
+          distributeNodes('vertical');
+          return;
+        }
+      }
+
+      if (!isMeta && !event.ctrlKey && event.key === 'Escape') {
+        event.preventDefault();
+        const store = useUiStore.getState();
+        store.clearNodeSelection();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [alignNodes, distributeNodes, duplicateSelectedNodes, nodes, resetView, zoomBy]);
 
   // connect to ws for live updates (development)
   useEffect(() => {

@@ -10,50 +10,53 @@ type HistoryActions = {
   redo: () => void;
 };
 
-type HistorySet<S extends object> = (partial: Partial<S> | ((state: S) => Partial<S>)) => void;
+type HistorySet = (partial: Partial<UiState> | ((state: UiState) => Partial<UiState>)) => void;
 
-function withHistory<S extends object>(
-  createState: (set: HistorySet<S>, get: () => S) => S,
-) {
+const cloneUiState = (value: UiState): UiState => ({
+  ...value,
+  selectedNodeIds: new Set(value.selectedNodeIds),
+});
+
+function withHistory(createState: (set: HistorySet, get: () => UiState) => UiState) {
   return (
-    set: (partial: Partial<S & HistoryActions> | ((state: S & HistoryActions) => Partial<S & HistoryActions>)) => void,
-    get: () => S & HistoryActions,
-  ): S & HistoryActions => {
-    const history: S[] = [];
-    let future: S[] = [];
+    set: (partial: Partial<UiState & HistoryActions> | ((state: UiState & HistoryActions) => Partial<UiState & HistoryActions>)) => void,
+    get: () => UiState & HistoryActions,
+  ): UiState & HistoryActions => {
+    const history: UiState[] = [];
+    let future: UiState[] = [];
 
-    const getPlainState = (): S => {
+    const getPlainState = (): UiState => {
       const { undo, redo, ...rest } = get();
       void undo;
       void redo;
-      return rest as S;
+      return cloneUiState(rest as UiState);
     };
 
-    const setAndRecord: HistorySet<S> = partial => {
+    const setAndRecord: HistorySet = partial => {
       const current = getPlainState();
-      history.push(JSON.parse(JSON.stringify(current)) as S);
+      history.push(cloneUiState(current));
       future = [];
-      const patch = typeof partial === 'function' ? (partial as (state: S) => Partial<S>)(current) : partial;
-      set(patch as Partial<S & HistoryActions>);
+      const patch = typeof partial === 'function' ? (partial as (state: UiState) => Partial<UiState>)(cloneUiState(current)) : partial;
+      set(patch as Partial<UiState & HistoryActions>);
     };
 
-    const baseState = createState(setAndRecord, getPlainState);
+    const baseState = createState(setAndRecord, () => getPlainState());
 
-    const applyState = (next: S) => {
-      set(() => next as Partial<S & HistoryActions>);
+    const applyState = (next: UiState) => {
+      set(() => cloneUiState(next) as Partial<UiState & HistoryActions>);
     };
 
     return {
       ...baseState,
       undo: () => {
         if (history.length === 0) return;
-        const prev = history.pop() as S;
+        const prev = history.pop() as UiState;
         future.push(getPlainState());
         applyState(prev);
       },
       redo: () => {
         if (future.length === 0) return;
-        const next = future.pop() as S;
+        const next = future.pop() as UiState;
         history.push(getPlainState());
         applyState(next);
       },
@@ -87,7 +90,7 @@ interface UiState {
 }
 
 export const useUiStore = create<UiState & HistoryActions>()(
-  withHistory<UiState>((set, _get) => {
+  withHistory((set, _get) => {
     void _get;
     return {
       view: { x: 0, y: 0, zoom: 1 },
