@@ -76,4 +76,24 @@ describe('CommandStack', () => {
     // after unsubscribe no new entries should be pushed
     expect(states.length).toBe(3);
   });
+
+  it('returns cached snapshots until state changes', () => {
+    const stack = new CommandStack();
+    const initial = stack.getSnapshot();
+    expect(initial).toEqual({ canUndo: false, canRedo: false });
+
+    const log: string[] = [];
+    stack.execute(createCommand(log, 'snap'));
+    const afterExecute = stack.getSnapshot();
+    expect(afterExecute).toEqual({ canUndo: true, canRedo: false });
+    expect(afterExecute).not.toBe(initial);
+
+    const sameReference = stack.getSnapshot();
+    expect(sameReference).toBe(afterExecute);
+
+    stack.undo();
+    const afterUndo = stack.getSnapshot();
+    expect(afterUndo).toEqual({ canUndo: false, canRedo: true });
+    expect(afterUndo).not.toBe(afterExecute);
+  });
 });

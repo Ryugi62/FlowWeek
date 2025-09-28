@@ -6,6 +6,9 @@ import { useQueryClient } from '@tanstack/react-query';
 import { deleteNode } from '../api';
 import { commandStack } from '../stores/commands';
 
+const subscribeToCommandStack = (listener: () => void) => commandStack.subscribe(listener);
+const getCommandStackSnapshot = () => commandStack.getSnapshot();
+
 const Toolbar: React.FC = () => {
     const {
         mode,
@@ -20,9 +23,10 @@ const Toolbar: React.FC = () => {
     const queryClient = useQueryClient();
     const [tagInput, setTagInput] = useState((tagFilters || []).join(', '));
 
-    const stackState = useSyncExternalStore(
-        (listener) => commandStack.subscribe(listener),
-        () => ({ canUndo: commandStack.canUndo(), canRedo: commandStack.canRedo() })
+    const { canUndo, canRedo } = useSyncExternalStore(
+        subscribeToCommandStack,
+        getCommandStackSnapshot,
+        getCommandStackSnapshot
     );
 
     useEffect(() => {
@@ -109,8 +113,8 @@ const Toolbar: React.FC = () => {
                 placeholder="Tags (comma separated)"
                 style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white', minWidth: '160px' }}
             />
-            <button style={buttonStyle('action', !stackState.canUndo)} onClick={() => commandStack.undo()} >Undo</button>
-            <button style={buttonStyle('action', !stackState.canRedo)} onClick={() => commandStack.redo()} >Redo</button>
+            <button style={buttonStyle('action', !canUndo)} onClick={() => commandStack.undo()} >Undo</button>
+            <button style={buttonStyle('action', !canRedo)} onClick={() => commandStack.redo()} >Redo</button>
         </div>
     );
 };

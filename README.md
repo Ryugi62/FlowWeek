@@ -65,6 +65,7 @@ NODE_ENV=development
 **apps/web/.env.local**:
 ```
 VITE_API_URL=http://localhost:3001/api
+VITE_WS_URL=ws://localhost:3001 # optional: enable realtime previews
 ```
 
 ## Available Scripts

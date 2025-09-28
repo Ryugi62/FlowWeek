@@ -4,11 +4,12 @@ import DetailPanel from './components/DetailPanel';
 import Toolbar from './components/Toolbar';
 import { useQuery } from '@tanstack/react-query';
 import apiClient, { connectWs, updateNode as updateNodeApi } from './api';
+import type { WsMessage } from './api';
 import { queryClient } from './stores';
 import { useState, useEffect, useCallback } from 'react';
 import { useUiStore } from './stores';
 import { commandStack } from './stores/commands';
-import type { Flow, Node, Edge, TaskStatus } from './types';
+import type { Flow, Node, Edge } from './types';
 
 // API fetch functions
 // ... (fetch functions remain the same)
@@ -130,16 +131,16 @@ function App() {
           e.preventDefault();
           if (e.shiftKey) {
             const s = useUiStore.getState();
-            s.redo && s.redo();
+            if (s.redo) s.redo();
           } else {
             const s = useUiStore.getState();
-            s.undo && s.undo();
+            if (s.undo) s.undo();
           }
         }
         if (e.key === 'y') {
           e.preventDefault();
           const s = useUiStore.getState();
-          s.redo && s.redo();
+          if (s.redo) s.redo();
         }
       }
       if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
@@ -174,8 +175,8 @@ function App() {
 
   // connect to ws for live updates (development)
   useEffect(() => {
-    const ws = connectWs((msg: any) => {
-      if (!msg || !msg.type) return;
+    const ws = connectWs((msg: WsMessage) => {
+      if (!msg?.type || msg.type === 'connection:ack') return;
       // granular updates for nodes
       if (msg.type === 'node:created') {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) => [...(old || []), msg.data]);
@@ -200,7 +201,9 @@ function App() {
         return;
       }
     });
-    return () => { ws && ws.close(); };
+    return () => {
+      if (ws) ws.close();
+    };
   }, [boardId]);
 
   const editingNode = nodes.find(n => n.id === editingNodeId) || null;
@@ -241,16 +244,23 @@ const fetchFlows = async (boardId: number) => {
 };
 const fetchNodes = async (boardId: number) => {
   const res = await apiClient.get(`/boards/${boardId}/nodes`);
-  const rows = res.data.data || [];
-  return rows.map((node: any) => ({
-    tags: [],
-    journaled_at: null,
-    status: node.type === 'task' ? 'todo' : null,
-    content: '',
+  type NodeResponse = Partial<Node> & {
+    tags?: unknown;
+    content?: unknown;
+    status?: unknown;
+  };
+  const rows: NodeResponse[] = res.data.data || [];
+  return rows.map<Node>(node => ({
     ...node,
+    content: typeof node.content === 'string' ? node.content : '',
     tags: Array.isArray(node.tags) ? node.tags : [],
-    journaled_at: node.journaled_at ?? null,
-    status: node.status ?? (node.type === 'task' ? 'todo' : null),
+    journaled_at: typeof node.journaled_at === 'string' ? node.journaled_at : null,
+    status:
+      typeof node.status === 'string'
+        ? (node.status as Node['status'])
+        : node.type === 'task'
+        ? 'todo'
+        : null,
   }));
 };
 const fetchEdges = async (boardId: number) => {
