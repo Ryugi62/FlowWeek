@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Node, TaskStatus } from '../types';
-import { updateNode as updateNodeApi } from '../api';
+import { updateNode as updateNodeApi, ConflictError, type NodeWritePayload } from '../api';
 import { commandStack } from '../stores/commands';
 
 interface DetailPanelProps {
@@ -57,6 +57,35 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
   const isTask = type === 'task';
   const isJournal = type === 'journal';
 
+  const resolveConflict = async (error: unknown, nodeId: number, desired: NodeWritePayload) => {
+    if (!(error instanceof ConflictError)) {
+      queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+      return;
+    }
+
+    const latest = error.latest;
+    queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+      (old || []).map(n => (n.id === latest.id ? latest : n)),
+    );
+
+    try {
+      const result = await updateNodeApi(boardId, nodeId, desired, { version: latest.updated_at });
+      const updated = (result?.data as Node | undefined) ?? latest;
+      queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+        (old || []).map(n => (n.id === updated.id ? updated : n)),
+      );
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        const newer = err.latest;
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+          (old || []).map(n => (n.id === newer.id ? newer : n)),
+        );
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+      }
+    }
+  };
+
   const disableSave = useMemo(() => {
     if (!node) return true;
     const initialTags = stringifyTags(node.tags || []);
@@ -100,7 +129,7 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
       journaled_at: nextJournaledAt,
     };
 
-    const payload = {
+    const payload: NodeWritePayload = {
       type: nextNode.type,
       title: nextNode.title,
       content: nextNode.content,
@@ -108,7 +137,7 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
       tags: nextNode.tags,
       journaled_at: nextNode.journaled_at,
     };
-    const revertPayload = {
+    const revertPayload: NodeWritePayload = {
       type: previous.type,
       title: previous.title,
       content: previous.content,
@@ -122,16 +151,18 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
           (old || []).map(n => (n.id === nextNode.id ? nextNode : n)),
         );
-        updateNodeApi(boardId, nextNode.id, payload, { version }).catch(() => {
-          queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+        const latestVersion = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(n => n.id === nextNode.id)?.updated_at || version;
+        updateNodeApi(boardId, nextNode.id, payload, { version: latestVersion }).catch(error => {
+          void resolveConflict(error, nextNode.id, payload);
         });
       },
       undo: () => {
         queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
           (old || []).map(n => (n.id === previous.id ? previous : n)),
         );
-        updateNodeApi(boardId, previous.id, revertPayload).catch(() => {
-          queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+        const currentVersion = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(n => n.id === previous.id)?.updated_at || version;
+        updateNodeApi(boardId, previous.id, revertPayload, { version: currentVersion }).catch(error => {
+          void resolveConflict(error, previous.id, revertPayload);
         });
       },
     });
@@ -140,194 +171,82 @@ const DetailPanel = ({ node, boardId, onClose }: DetailPanelProps) => {
   };
 
   return (
-    <aside
-      style={{
-        position: 'absolute',
-        top: 0,
-        right: 0,
-        width: '320px',
-        height: '100%',
-        backgroundColor: '#111827',
-        borderLeft: '1px solid #1f2937',
-        color: '#e5e7eb',
-        padding: '20px',
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '16px',
-      }}
-    >
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ margin: 0 }}>노드 편집</h3>
+    <aside className="detail-panel">
+      <header className="detail-panel__header">
+        <h3 className="detail-panel__title">노드 편집</h3>
         <button
+          className="detail-panel__close"
           onClick={onClose}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            color: '#9ca3af',
-            cursor: 'pointer',
-            fontSize: '16px',
-          }}
+          aria-label="Close detail panel"
         >
           ✕
         </button>
       </header>
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        <span>타입</span>
-        <select
-          value={type}
-          onChange={e => {
-            const value = e.target.value as Node['type'];
-            const wasTask = type === 'task';
-            setType(value);
-            if (value === 'task' && !wasTask) {
-              setStatus('todo');
-            }
-            if (value !== 'task' && wasTask) {
-              setStatus('todo');
-            }
-            if (value === 'journal' && !journaledAtInput) {
-              setJournaledAtInput(toDatetimeLocalValue(new Date().toISOString()));
-            }
-            if (value !== 'journal') {
-              setJournaledAtInput('');
-            }
-          }}
-          style={{
-            padding: '8px',
-            borderRadius: '4px',
-            border: '1px solid #374151',
-            background: '#1f2937',
-            color: '#e5e7eb',
-          }}
-        >
-          <option value="task">Task</option>
-          <option value="note">Note</option>
-          <option value="journal">Journal</option>
-        </select>
-      </label>
+      <section className="detail-panel__body">
+        <label className="detail-panel__field">
+          <span>Title</span>
+          <input value={title} onChange={event => setTitle(event.target.value)} />
+        </label>
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        <span>제목</span>
-        <input
-          type="text"
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          style={{
-            padding: '8px',
-            borderRadius: '4px',
-            border: '1px solid #374151',
-            background: '#1f2937',
-            color: '#e5e7eb',
-          }}
-        />
-      </label>
+        <label className="detail-panel__field">
+          <span>Content</span>
+          <textarea value={content} onChange={event => setContent(event.target.value)} rows={5} />
+        </label>
 
-      {isTask && (
-        <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span>상태</span>
-          <select
-            value={status}
-            onChange={e => setStatus(e.target.value as TaskStatus)}
-            style={{
-              padding: '8px',
-              borderRadius: '4px',
-              border: '1px solid #374151',
-              background: '#1f2937',
-              color: '#e5e7eb',
-            }}
-          >
-            {TASK_STATUS_OPTIONS.map(option => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
+        <label className="detail-panel__field">
+          <span>Type</span>
+          <select value={type} onChange={event => setType(event.target.value as Node['type'])}>
+            <option value="note">Note</option>
+            <option value="task">Task</option>
+            <option value="journal">Journal</option>
           </select>
         </label>
-      )}
 
-      {isJournal && (
-        <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span>기록 시각</span>
+        {isTask && (
+          <label className="detail-panel__field">
+            <span>Status</span>
+            <select value={status} onChange={event => setStatus(event.target.value as TaskStatus)}>
+              {TASK_STATUS_OPTIONS.map(option => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {isJournal && (
+          <label className="detail-panel__field">
+            <span>Journaled at</span>
+            <input
+              type="datetime-local"
+              value={journaledAtInput}
+              onChange={event => setJournaledAtInput(event.target.value)}
+            />
+          </label>
+        )}
+
+        <label className="detail-panel__field">
+          <span>Tags (comma separated)</span>
           <input
-            type="datetime-local"
-            value={journaledAtInput}
-            onChange={e => setJournaledAtInput(e.target.value)}
-            style={{
-              padding: '8px',
-              borderRadius: '4px',
-              border: '1px solid #374151',
-              background: '#1f2937',
-              color: '#e5e7eb',
-            }}
+            value={tagsInput}
+            onChange={event => setTagsInput(event.target.value)}
+            placeholder="design, research"
           />
         </label>
-      )}
+      </section>
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        <span>{isJournal ? '본문' : '내용'}</span>
-        <textarea
-          value={content}
-          onChange={e => setContent(e.target.value)}
-          rows={6}
-          style={{
-            padding: '8px',
-            borderRadius: '4px',
-            border: '1px solid #374151',
-            background: '#1f2937',
-            color: '#e5e7eb',
-            resize: 'vertical',
-            minHeight: '120px',
-          }}
-        />
-      </label>
-
-      <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        <span>태그 (쉼표 구분)</span>
-        <input
-          type="text"
-          value={tagsInput}
-          onChange={e => setTagsInput(e.target.value)}
-          placeholder="e.g. design, research"
-          style={{
-            padding: '8px',
-            borderRadius: '4px',
-            border: '1px solid #374151',
-            background: '#1f2937',
-            color: '#e5e7eb',
-          }}
-        />
-      </label>
-
-      <footer style={{ marginTop: 'auto', display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-        <button
-          onClick={onClose}
-          style={{
-            padding: '8px 12px',
-            borderRadius: '4px',
-            border: '1px solid #4b5563',
-            background: 'transparent',
-            color: '#9ca3af',
-            cursor: 'pointer',
-          }}
-        >
-          취소
+      <footer className="detail-panel__footer">
+        <button className="detail-panel__button" onClick={onClose}>
+          Cancel
         </button>
         <button
+          className="detail-panel__button detail-panel__button--primary"
           onClick={handleSave}
           disabled={disableSave}
-          style={{
-            padding: '8px 14px',
-            borderRadius: '4px',
-            border: 'none',
-            background: disableSave ? '#374151' : '#3b82f6',
-            color: disableSave ? '#9ca3af' : '#f9fafb',
-            cursor: disableSave ? 'not-allowed' : 'pointer',
-            transition: 'background 0.2s ease',
-          }}
         >
-          저장
+          Save
         </button>
       </footer>
     </aside>

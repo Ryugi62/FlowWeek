@@ -271,10 +271,6 @@ app.patch(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (r
   if (!existing) return res.status(404).json({ error: 'Node not found' });
 
   const versionHeader = req.get('x-node-version');
-  if (versionHeader && existing.updatedAt.toISOString() !== versionHeader) {
-    return res.status(409).json({ error: 'conflict', data: toNodeResponse(existing) });
-  }
-
   const partial = normaliseNodeInput(existing.boardId, { ...existing, ...req.body });
   if (
     partial.title === existing.title &&
@@ -289,10 +285,11 @@ app.patch(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (r
   ) {
     return res.json({ data: toNodeResponse(existing) });
   }
+  const isConflict = Boolean(versionHeader && existing.updatedAt.toISOString() !== versionHeader);
   const updated = await prisma.node.update({ where: { id: nodeId }, data: partial });
   const response = toNodeResponse(updated);
-  res.json({ data: response });
-  broadcast({ type: 'node:updated', data: response, meta: { clientId } });
+  res.status(isConflict ? 202 : 200).json({ data: response, meta: isConflict ? { conflicted: true } : undefined });
+  broadcast({ type: 'node:updated', data: response, meta: { clientId, conflicted: isConflict } });
 });
 
 app.delete(['/api/nodes/:nodeId', '/api/boards/:boardId/nodes/:nodeId'], async (req, res) => {

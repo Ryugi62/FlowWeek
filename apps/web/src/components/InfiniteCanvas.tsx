@@ -2,7 +2,16 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { Flow, Node, Edge, TaskStatus } from '../types';
 import { useUiStore } from '../stores';
 import { useQueryClient } from '@tanstack/react-query';
-import { updateNode, createNode, createEdge, deleteNode, deleteEdge, type EdgeWritePayload } from '../api';
+import {
+  updateNode,
+  createNode,
+  createEdge,
+  deleteNode,
+  deleteEdge,
+  type EdgeWritePayload,
+  type NodeWritePayload,
+  ConflictError,
+} from '../api';
 import { commandStack } from '../stores/commands';
 import { filterNodes } from '../utils/filterNodes';
 
@@ -114,8 +123,37 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
   const pinchStateRef = useRef<{ distance: number; zoom: number; anchor: { x: number; y: number } } | null>(null);
   const primaryPointerIdRef = useRef<number | null>(null);
   const ui = useUiStore();
+  const queryClient = useQueryClient();
   const selectionCount = ui.selectedNodeIds.size;
   const [metrics, setMetrics] = useState<MetricsSnapshot>({ fps: 0, nodes: nodes.length, edges: edges.length, selection: selectionCount });
+  const spacePressedRef = useRef(false);
+
+  const handleNodeConflict = useCallback(
+    async (
+      error: unknown,
+      nodeId: number,
+      desired: NodeWritePayload,
+      attempt = 0,
+    ) => {
+      if (!(error instanceof ConflictError)) return false;
+      const latest = error.latest;
+      queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+        (old || []).map(node => (node.id === latest.id ? latest : node)),
+      );
+      if (attempt >= 1) return true;
+      try {
+        const result = await updateNode(boardId, nodeId, desired, { version: latest.updated_at });
+        const serverNode = (result?.data as Node | undefined) || latest;
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+          (old || []).map(node => (node.id === serverNode.id ? serverNode : node)),
+        );
+      } catch (conflictErr) {
+        await handleNodeConflict(conflictErr, nodeId, desired, attempt + 1);
+      }
+      return true;
+    },
+    [boardId, queryClient],
+  );
 
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     const fw = getFlowweekWindow();
@@ -124,12 +162,61 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       metrics,
     };
   }
-  const queryClient = useQueryClient();
   const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null);
   const [hoverNodeId, setHoverNodeId] = useState<number | null>(null);
   const [hoverHandle, setHoverHandle] = useState<ResizeHandle | null>(null);
 
   // We'll perform manual optimistic updates using queryClient and direct api calls
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return;
+        }
+      }
+      if (!spacePressedRef.current) {
+        spacePressedRef.current = true;
+      }
+      event.preventDefault();
+      const canvas = canvasRef.current;
+      if (canvas && !panRef.current) {
+        canvas.style.cursor = 'grab';
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      spacePressedRef.current = false;
+      const canvas = canvasRef.current;
+      if (canvas && !panRef.current) {
+        canvas.style.cursor = ui.mode === 'panning' ? 'grab' : 'default';
+      }
+    };
+    const resetSpace = () => {
+      spacePressedRef.current = false;
+      const canvas = canvasRef.current;
+      if (canvas && !panRef.current) {
+        canvas.style.cursor = ui.mode === 'panning' ? 'grab' : 'default';
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, { passive: false });
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', resetSpace);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', resetSpace);
+    };
+  }, [ui.mode]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || panRef.current?.isPanning) return;
+    canvas.style.cursor = ui.mode === 'panning' || spacePressedRef.current ? 'grab' : 'default';
+  }, [ui.mode]);
 
   // Resize canvas to container
   useEffect(() => {
@@ -626,8 +713,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
           updates.forEach((val, id) => {
             const version = latest.find(node => node.id === id)?.updated_at;
-            updateNode(boardId, id, val, { version }).catch(() => {
-              queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+            const payload: NodeWritePayload = { ...val };
+            updateNode(boardId, id, payload, { version }).catch(error => {
+              void handleNodeConflict(error, id, payload);
             });
           });
         },
@@ -638,8 +726,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
           const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
           prev.forEach((val, id) => {
             const version = latest.find(node => node.id === id)?.updated_at;
-            updateNode(boardId, id, val, { version }).catch(() => {
-              queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+            const payload: NodeWritePayload = { ...val };
+            updateNode(boardId, id, payload, { version }).catch(error => {
+              void handleNodeConflict(error, id, payload);
             });
           });
         },
@@ -679,8 +768,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       } else {
         setSelectedEdgeId(null);
       }
-      if (ui.mode === 'panning' || e.button === 1) {
+      const shouldPan = ui.mode === 'panning' || spacePressedRef.current || e.button === 1;
+      if (shouldPan) {
         panRef.current = { isPanning: true, startX: e.clientX, startY: e.clientY };
+        canvas.style.cursor = 'grabbing';
         return;
       }
 
@@ -787,8 +878,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
                     ),
                   );
                   const version = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(node => node.id === target.id)?.updated_at;
-                  updateNode(boardId, target.id, { status: nextStatus }, { version }).catch(() => {
-                    queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+                  const payload: NodeWritePayload = { status: nextStatus };
+                  updateNode(boardId, target.id, payload, { version }).catch(error => {
+                    void handleNodeConflict(error, target.id, payload);
                   });
                 },
                 undo: () => {
@@ -798,8 +890,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
                     ),
                   );
                   const version = (queryClient.getQueryData<Node[]>(['nodes', boardId]) || []).find(node => node.id === target.id)?.updated_at;
-                  updateNode(boardId, target.id, { status: prevStatus }, { version }).catch(() => {
-                    queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+                  const payload: NodeWritePayload = { status: prevStatus };
+                  updateNode(boardId, target.id, payload, { version }).catch(error => {
+                    void handleNodeConflict(error, target.id, payload);
                   });
                 },
               });
@@ -875,6 +968,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
       const primaryId = primaryPointerIdRef.current;
       if (e.pointerType !== 'touch' && primaryId !== null && e.pointerId !== primaryId) return;
       if (panRef.current?.isPanning) {
+        e.preventDefault();
         const dx = (panRef.current.startX - e.clientX) / ui.view.zoom;
         const dy = (panRef.current.startY - e.clientY) / ui.view.zoom;
         ui.setView({ x: ui.view.x + dx, y: ui.view.y + dy });
@@ -973,6 +1067,10 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
 
       if (panRef.current?.isPanning) {
         panRef.current = null;
+        const canvasEl = canvasRef.current;
+        if (canvasEl) {
+          canvasEl.style.cursor = ui.mode === 'panning' || spacePressedRef.current ? 'grab' : 'default';
+        }
       }
       if (groupResizeRef.current) {
         commitGroupResize();
@@ -1023,8 +1121,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
             const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
             nextMap.forEach((pos, id) => {
               const version = latest.find(node => node.id === id)?.updated_at;
-              updateNode(boardId, id, pos, { version }).catch(() => {
-                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              const payload: NodeWritePayload = { ...pos };
+              updateNode(boardId, id, payload, { version }).catch(error => {
+                void handleNodeConflict(error, id, payload);
               });
             });
           };
@@ -1033,8 +1132,9 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
             const latest = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
             prevMap.forEach((pos, id) => {
               const version = latest.find(node => node.id === id)?.updated_at;
-              updateNode(boardId, id, pos, { version }).catch(() => {
-                queryClient.invalidateQueries({ queryKey: ['nodes', boardId] });
+              const payload: NodeWritePayload = { ...pos };
+              updateNode(boardId, id, payload, { version }).catch(error => {
+                void handleNodeConflict(error, id, payload);
               });
             });
           };
@@ -1327,6 +1427,7 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
     hoverHandle,
     hoverNodeId,
     screenToWorld,
+    handleNodeConflict,
   ]);
 
   return (
@@ -1336,17 +1437,18 @@ const InfiniteCanvas: React.FC<CanvasProps> = ({ flows, nodes, edges, boardId, o
         <div
           style={{
             position: 'absolute',
-            top: 12,
-            left: 12,
+            left: 16,
+            bottom: 16,
             background: 'rgba(15, 23, 42, 0.72)',
-            border: '1px solid rgba(148, 163, 184, 0.3)',
-            borderRadius: 8,
-            padding: '8px 12px',
+            border: '1px solid rgba(148, 163, 184, 0.25)',
+            borderRadius: 10,
+            padding: '10px 14px',
             fontSize: 12,
             color: '#e2e8f0',
             fontFamily: 'Menlo, Consolas, monospace',
             pointerEvents: 'none',
-            lineHeight: 1.5,
+            lineHeight: 1.6,
+            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.35)',
           }}
         >
           <div>fps: {metrics.fps}</div>

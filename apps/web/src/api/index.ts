@@ -83,10 +83,20 @@ export const updateNode = async (
 ) => {
   const headers = withClientHeaders();
   if (options.version) headers['x-node-version'] = options.version;
-  const res = await apiClient.patch(`/boards/${boardId}/nodes/${nodeId}`, payload, {
-    headers,
-  });
-  return res.data;
+  try {
+    const res = await apiClient.patch(`/boards/${boardId}/nodes/${nodeId}`, payload, {
+      headers,
+    });
+    return res.data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 409) {
+      const latest = (error.response.data?.data ?? null) as Node | null;
+      if (latest) {
+        throw new ConflictError(latest);
+      }
+    }
+    throw error;
+  }
 };
 
 export const deleteNode = async (boardId: number, nodeId: number) => {
@@ -228,3 +238,13 @@ export function connectWs(clientId: string, onMessage: WsListener): WsConnection
 }
 
 export type { WsMessage, NodeWritePayload, EdgeWritePayload };
+
+export class ConflictError extends Error {
+  latest: Node;
+
+  constructor(latest: Node) {
+    super('conflict');
+    this.name = 'ConflictError';
+    this.latest = latest;
+  }
+}

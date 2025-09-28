@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useUiStore } from '../stores';
 import type { InteractionMode, StatusFilter } from '../stores';
 import type { Node } from '../types';
@@ -10,123 +10,126 @@ const subscribeToCommandStack = (listener: () => void) => commandStack.subscribe
 const getCommandStackSnapshot = () => commandStack.getSnapshot();
 
 const Toolbar: React.FC = () => {
-    const {
-        mode,
-        setMode,
-        searchTerm = '',
-        setSearchTerm,
-        statusFilter,
-        setStatusFilter,
-        tagFilters,
-        setTagFilters,
-    } = useUiStore();
-    const queryClient = useQueryClient();
-    const [tagInput, setTagInput] = useState((tagFilters || []).join(', '));
+  const {
+    mode,
+    setMode,
+    searchTerm = '',
+    setSearchTerm,
+    statusFilter,
+    setStatusFilter,
+    tagFilters,
+    setTagFilters,
+  } = useUiStore();
+  const queryClient = useQueryClient();
+  const [tagInput, setTagInput] = useState((tagFilters || []).join(', '));
 
-    const { canUndo, canRedo } = useSyncExternalStore(
-        subscribeToCommandStack,
-        getCommandStackSnapshot,
-        getCommandStackSnapshot
-    );
+  const { canUndo, canRedo } = useSyncExternalStore(
+    subscribeToCommandStack,
+    getCommandStackSnapshot,
+    getCommandStackSnapshot,
+  );
 
-    useEffect(() => {
-        setTagInput((tagFilters || []).join(', '));
-    }, [tagFilters]);
+  useEffect(() => {
+    setTagInput((tagFilters || []).join(', '));
+  }, [tagFilters]);
 
-    const applyTagFilter = (value: string) => {
-        setTagInput(value);
-        const parsed = value
-            .split(',')
-            .map(token => token.trim().toLowerCase())
-            .filter(Boolean);
-        setTagFilters(parsed);
+  const applyTagFilter = (value: string) => {
+    setTagInput(value);
+    const parsed = value
+      .split(',')
+      .map(token => token.trim().toLowerCase())
+      .filter(Boolean);
+    setTagFilters(parsed);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete') return;
+      const state = useUiStore.getState();
+      const ids = Array.from(state.selectedNodeIds);
+      if (ids.length === 0) return;
+      const boardId = 1;
+      const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
+      const redo = () =>
+        queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
+          (old || []).filter(n => !ids.includes(n.id)),
+        );
+      const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
+      commandStack.execute({
+        redo: () => {
+          redo();
+          ids.forEach(id => deleteNode(boardId, id).catch(() => {}));
+        },
+        undo,
+      });
+      state.clearNodeSelection();
     };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [queryClient]);
 
-    // Delete key handler to delete selected nodes
-    useEffect(() => {
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Delete') {
-                const state = useUiStore.getState();
-                const ids = Array.from(state.selectedNodeIds);
-                if (ids.length === 0) return;
-                // optimistic remove
-                const boardId = 1;
-                const previous = queryClient.getQueryData<Node[]>(['nodes', boardId]) || [];
-                const redo = () =>
-                    queryClient.setQueryData<Node[]>(['nodes', boardId], (old = []) =>
-                        (old || []).filter(n => !ids.includes(n.id))
-                    );
-                const undo = () => queryClient.setQueryData<Node[]>(['nodes', boardId], previous);
-                commandStack.execute({
-                    redo: () => {
-                        redo();
-                        ids.forEach(id => deleteNode(boardId, id).catch(() => {}));
-                    },
-                    undo,
-                });
-                state.clearNodeSelection();
-            }
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, [queryClient]);
+  const buttonClass = useMemo(
+    () =>
+      (buttonMode: InteractionMode | 'action', disabled = false) => {
+        const classes = ['toolbar__button'];
+        if (buttonMode !== 'action' && mode === buttonMode) classes.push('toolbar__button--active');
+        if (disabled) classes.push('toolbar__button--disabled');
+        return classes.join(' ');
+      },
+    [mode],
+  );
 
-    const buttonStyle = (buttonMode: InteractionMode | 'action', disabled = false): React.CSSProperties => ({
-        padding: '8px 12px',
-        fontSize: '14px',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        border: '1px solid #4b5563',
-        background: mode === buttonMode ? '#3b82f6' : '#374151',
-        color: disabled ? '#9ca3af' : 'white',
-        borderRadius: '4px',
-        opacity: disabled ? 0.5 : 1,
-    });
+  return (
+    <div className="toolbar">
+      <div className="toolbar__group">
+        <button className={buttonClass('select')} onClick={() => setMode('select')}>
+          Select (V)
+        </button>
+        <button className={buttonClass('panning')} onClick={() => setMode('panning')}>
+          Pan (H)
+        </button>
+        <button className={buttonClass('linking')} onClick={() => setMode('linking')}>
+          Link (L)
+        </button>
+      </div>
 
-    return (
-        <div style={{
-            position: 'absolute',
-            top: '80px',
-            left: '20px',
-            zIndex: 10,
-            display: 'flex',
-            gap: '10px',
-            background: '#1f2937',
-            padding: '10px',
-            borderRadius: '8px',
-            boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-            flexWrap: 'wrap',
-            alignItems: 'center'
-        }}>
-            <button style={buttonStyle('select')} onClick={() => setMode('select')}>Select (V)</button>
-            <button style={buttonStyle('panning')} onClick={() => setMode('panning')}>Pan (H)</button>
-            <button style={buttonStyle('linking')} onClick={() => setMode('linking')}>Link (L)</button>
-            <div style={{ borderLeft: '2px solid #4b5563', margin: '0 5px' }}></div>
-            <input
-                value={searchTerm}
-                onChange={(e) => setSearchTerm?.(e.target.value)}
-                placeholder="Search title or content"
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white' }}
-            />
-            <select
-                value={statusFilter ?? 'all'}
-                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white' }}
-            >
-                <option value="all">All status</option>
-                <option value="todo">Todo</option>
-                <option value="in-progress">In progress</option>
-                <option value="done">Done</option>
-            </select>
-            <input
-                value={tagInput}
-                onChange={(e) => applyTagFilter(e.target.value)}
-                placeholder="Tags (comma separated)"
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #4b5563', background: '#111827', color: 'white', minWidth: '160px' }}
-            />
-            <button style={buttonStyle('action', !canUndo)} onClick={() => commandStack.undo()} >Undo</button>
-            <button style={buttonStyle('action', !canRedo)} onClick={() => commandStack.redo()} >Redo</button>
-        </div>
-    );
+      <div className="toolbar__divider" aria-hidden />
+
+      <input
+        className="toolbar__input"
+        value={searchTerm}
+        onChange={event => setSearchTerm?.(event.target.value)}
+        placeholder="Search title or content"
+      />
+
+      <select
+        className="toolbar__select"
+        value={statusFilter ?? 'all'}
+        onChange={event => setStatusFilter(event.target.value as StatusFilter)}
+      >
+        <option value="all">All status</option>
+        <option value="todo">Todo</option>
+        <option value="in-progress">In progress</option>
+        <option value="done">Done</option>
+      </select>
+
+      <input
+        className="toolbar__input toolbar__input--tags"
+        value={tagInput}
+        onChange={event => applyTagFilter(event.target.value)}
+        placeholder="Tags (comma separated)"
+      />
+
+      <div className="toolbar__group">
+        <button className={buttonClass('action', !canUndo)} onClick={() => commandStack.undo()} disabled={!canUndo}>
+          Undo
+        </button>
+        <button className={buttonClass('action', !canRedo)} onClick={() => commandStack.redo()} disabled={!canRedo}>
+          Redo
+        </button>
+      </div>
+    </div>
+  );
 };
 
 export default Toolbar;
